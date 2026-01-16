@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "teval"
+version = "0.1.0"
+description = "Analysis and evaluation toolkit for NextGen t-route ensemble outputs"
+authors = [
+  { name="Sean Horvath", email="sean.horvath@noaa.gov" },
+]
+requires-python = ">=3.9"
+dependencies = [
+    "xarray>=2023.0.0",
+    "dask>=2023.0.0",           # Crucial for large 200GB files
+    "netCDF4",                  # Backend for xarray
+    "numpy",
+    "pandas",
+    "geopandas",                # For handling the Hydrofabric
+    "shapely",
+    "scipy",                    # For BMA/statistical fitting
+    "dataretrieval",            # USGS official python package
+    "click",                    # For the CLI
+    "hvplot",                   # Interactive plotting
+    "holoviews",
+    "bokeh",
+    "hydroeval",                # Existing hydrologic metrics library (optional, or we build our own)
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "flake8",
+    "jupyterlab",
+]
+
+[project.scripts]
+teval = "teval.cli:main"  # Allows users to type 'teval' in terminal
