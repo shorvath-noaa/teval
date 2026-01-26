@@ -1,0 +1,13 @@
+numpy>=1.26.0
+pandas>=2.0.0
+xarray
+netCDF4
+h5py
+geopandas
+matplotlib
+scipy
+contextily
+folium
+dataretrieval
+shapely
+hvplot

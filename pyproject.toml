@@ -6,34 +6,49 @@ build-backend = "setuptools.build_meta"
 name = "teval"
 version = "0.1.0"
 description = "Analysis and evaluation toolkit for NextGen t-route ensemble outputs"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "CC0-1.0"}
 authors = [
   { name="Sean Horvath", email="sean.horvath@noaa.gov" },
 ]
-requires-python = ">=3.9"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Hydrology",
+]
+
 dependencies = [
-    "xarray>=2023.0.0",
-    "dask>=2023.0.0",           # Crucial for large 200GB files
-    "netCDF4",                  # Backend for xarray
     "numpy",
     "pandas",
-    "geopandas",                # For handling the Hydrofabric
-    "shapely",
-    "scipy",                    # For BMA/statistical fitting
-    "dataretrieval",            # USGS official python package
-    "click",                    # For the CLI
-    "hvplot",                   # Interactive plotting
-    "holoviews",
-    "bokeh",
-    "hydroeval",                # Existing hydrologic metrics library (optional, or we build our own)
+    "scipy",
+    "netCDF4",
+    "h5py",
+    "xarray",
+    "geopandas",
+    "matplotlib",
+    "contextily",
+    "folium",
+    "dataretrieval",
+    "shapely"
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest",
-    "black",
-    "flake8",
-    "jupyterlab",
+    "pytest-cov"
 ]
 
-[project.scripts]
-teval = "teval.cli:main"  # Allows users to type 'teval' in terminal
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-ra -q"
+testpaths = [
+    "tests",
+]
+# filterwarnings = [
+#     # Ignore the specific numpy binary incompatibility warning
+#     "ignore:numpy.ndarray size changed:RuntimeWarning",
+#     # Optional: Ignore other common harmless warnings if they appear later
+#     "ignore::DeprecationWarning:jupyter_client.*" 
+# ]

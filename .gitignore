@@ -214,7 +214,7 @@ __marimo__/
 *.gpkg
 *.db
 /data/
+/output/
 
 # IDE settings (optional but helpful)
 .vscode/
-.idea/
