@@ -1,4 +1,4 @@
-# src/teval/obs/usgs.py
+
 import pandas as pd
 import dataretrieval.nwis as nwis
 from typing import List, Union, Optional
@@ -29,7 +29,7 @@ def fetch_usgs_streamflow(
     # 00060 = Discharge (cfs), 00065 = Gage height
     # iv = instantaneous values (usually 15-min)
     # dv = daily values
-    # We try 'iv' first for high-res validation, fall back to 'dv' if needed? 
+    # Try 'iv' first for high-res validation, fall back to 'dv' if needed. 
     # For t-route, 'iv' is usually preferred.
     
     print(f"Fetching USGS data for {len(site_ids)} sites from {start_date} to {end_date}...")
@@ -83,7 +83,7 @@ def fetch_usgs_streamflow(
         if df_pivot.index.tz is not None:
             df_pivot.index = df_pivot.index.tz_convert('UTC')
         else:
-            # If naive, assume UTC (risky) or warn user
+            # If naive, assume UTC or warn user
             print("Warning: USGS data returned timezone-naive. Assuming UTC.")
             df_pivot.index = df_pivot.index.tz_localize('UTC')
 
