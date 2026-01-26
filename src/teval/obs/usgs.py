@@ -6,6 +6,36 @@ from typing import List, Union, Optional
 # Conversion constant: CFS to CMS
 CFS_TO_CMS = 0.028316847
 
+def find_gages_in_domain(min_x: float, min_y: float, max_x: float, max_y: float) -> pd.DataFrame:
+    """
+    Queries USGS NWIS for stream gages within a bounding box.
+    
+    Args:
+        min_x, min_y, max_x, max_y: Bounding box coordinates (Long/Lat).
+        
+    Returns:
+        pd.DataFrame: Metadata of found sites (site_no, station_nm, dec_lat_va, dec_long_va).
+    """
+    print(f"Searching for USGS gages in bbox: {min_x}, {min_y}, {max_x}, {max_y}")
+    
+    # "00060" = Streamflow, "iv" = Instantaneous
+    try:
+        sites_df, _ = nwis.what_sites(
+            bBox=f"{min_x},{min_y},{max_x},{max_y}",
+            parameterCd="00060",
+            hasDataTypeCd="iv"
+        )
+    except Exception as e:
+        print(f"Error querying NWIS sites: {e}")
+        return pd.DataFrame()
+    
+    if sites_df is None or sites_df.empty:
+        print("No gages found in this domain.")
+        return pd.DataFrame()
+        
+    print(f"Found {len(sites_df)} gages.")
+    return sites_df
+
 def fetch_usgs_streamflow(
     site_ids: List[str],
     start_date: str,
@@ -32,6 +62,9 @@ def fetch_usgs_streamflow(
     # Try 'iv' first for high-res validation, fall back to 'dv' if needed. 
     # For t-route, 'iv' is usually preferred.
     
+    if isinstance(site_ids, str):
+        site_ids = [site_ids]
+        
     print(f"Fetching USGS data for {len(site_ids)} sites from {start_date} to {end_date}...")
     
     try:
@@ -47,33 +80,36 @@ def fetch_usgs_streamflow(
         print(f"Error fetching from NWIS: {e}")
         return pd.DataFrame()
 
-    if df_flow.empty:
+    if df_flow is None or df_flow.empty:
         print("Warning: No USGS data returned for these sites/dates.")
         return pd.DataFrame()
 
     # Clean up the DataFrame
-    # dataretrieval returns a messy frame with qualifiers/codes
-    # The value column is usually '00060_Mean' or similar, but the index is the time.
+    # 1. Reset index to ensure site_no and datetime are accessible columns
+    # (dataretrieval usually returns them as a MultiIndex)
+    df_reset = df_flow.reset_index()
     
-    # We pivot to get shape: (Time x Sites)
-    # The raw dataframe has a 'site_no' column and a value column.
+    # 2. Identify ALL potential flow columns
+    # Rule: Must contain "00060" and NOT end with "cd" (which is a quality flag)
+    flow_cols = [c for c in df_reset.columns if "00060" in c and not c.endswith("cd")]
     
-    # Identify the value column (it usually ends in 00060)
-    val_cols = [c for c in df_flow.columns if c.endswith('00060')]
-    if not val_cols:
-        # Fallback if specific column name varies
-        val_cols = [c for c in df_flow.columns if "00060" in c and "cd" not in c]
-    
-    if not val_cols:
+    if not flow_cols:
+        print("Columns found:", df_reset.columns)
         raise ValueError("Could not identify streamflow value column in NWIS response.")
     
-    val_col = val_cols[0]
+    # 3. Merge columns
+    if len(flow_cols) > 1:
+        df_reset["_consolidated_flow"] = df_reset[flow_cols].bfill(axis=1).iloc[:, 0]
+        val_col = "_consolidated_flow"
+    else:
+        val_col = flow_cols[0]
     
     # Pivot so each column is a site
-    df_pivot = df_flow.pivot_table(
-        index=df_flow.index, 
+    df_pivot = df_reset.pivot_table(
+        index='datetime', 
         columns='site_no', 
-        values=val_col
+        values=val_col,
+        aggfunc='first'
     )
     
     # Timezone conversion
