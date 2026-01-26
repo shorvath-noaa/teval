@@ -79,7 +79,6 @@ def load_hydrofabric(
     # Ensure we define the ID column cleanly
     col_to_use = id_col
     if id_col not in gdf.columns:
-        # Try to guess usually suspects
         if 'id' in gdf.columns: col_to_use = 'id'
         elif 'comid' in gdf.columns: col_to_use = 'comid'
         else:

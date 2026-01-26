@@ -25,18 +25,17 @@ def hydrograph(stats_ds: xr.Dataset, feature_id: int, var_name: str = "streamflo
         p05 = data[f"{var_name}_p05"]
         p95 = data[f"{var_name}_p95"]
     else:
-        # Fallback: maybe the user passed a dataset that is ALREADY just streamflow stats?
+        # Fallback: maybe the user passed a dataset that is already just streamflow stats?
         # This makes it safer if names vary
         mean = data["mean"] if "mean" in data else data
         median = data["median"] if "median" in data else data
-        # Note: You might need to adjust this depending on strict naming
         
-    # 3. Handle Time Index (ROBUST FIX)
-    # Check if the time is ALREADY a datetime object
+    # 3. Handle Time Index
+    # Check if the time is already a datetime object
     if pd.api.types.is_datetime64_any_dtype(data.time):
         times = data.time.values
     elif 'reference_time' in data.coords:
-        # Only do the offset math if time is NOT already datetime
+        # Only do the offset math if time is not already datetime
         ref_time = pd.to_datetime(data.reference_time.values)
         hours = pd.to_timedelta(data.time.values, unit='h')
         times = ref_time + hours
