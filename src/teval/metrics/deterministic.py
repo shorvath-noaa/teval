@@ -13,6 +13,15 @@ def align_and_validate(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> p
     if isinstance(sim, xr.DataArray):
         sim = sim.to_series()
 
+    # Force timezone alignment if one is TZ-aware and other is not
+    # We default to removing timezone info for comparison if they mismatch
+    if sim.index.tz is not None and obs.index.tz is None:
+        sim = sim.tz_convert(None)
+    elif sim.index.tz is None and obs.index.tz is not None:
+        obs = obs.tz_convert(None)
+    elif sim.index.tz != obs.index.tz:
+        sim = sim.tz_convert(obs.index.tz)
+        
     # Align indices (inner join on time)
     # This handles mismatched start/end dates automatically
     df = pd.DataFrame({'sim': sim, 'obs': obs}).dropna()
@@ -28,6 +37,9 @@ def nse(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> float:
     Range: (-inf, 1]. 1 is perfect. 0 is as good as the mean of obs.
     """
     df = align_and_validate(sim, obs)
+    if df.empty: 
+        return np.nan
+    
     s = df['sim'].values
     o = df['obs'].values
     
@@ -45,12 +57,18 @@ def kge(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> float:
     Range: (-inf, 1]. 1 is perfect.
     """
     df = align_and_validate(sim, obs)
+    if df.empty: 
+        return np.nan
+    
     s = df['sim'].values
     o = df['obs'].values
 
     # Mean and Std Dev
     mean_s, mean_o = np.mean(s), np.mean(o)
     std_s, std_o = np.std(s), np.std(o)
+    
+    if std_o == 0: 
+        return -np.inf
     
     # Components
     r = np.corrcoef(s, o)[0, 1] # Correlation
@@ -68,15 +86,38 @@ def rmse(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> float:
     Lower is better.
     """
     df = align_and_validate(sim, obs)
+    if df.empty: 
+        return np.nan
+    
     s = df['sim'].values
     o = df['obs'].values
     
     return np.sqrt(np.mean((s - o)**2))
+
+def bias(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> float:
+    """Mean Bias (Sim - Obs)."""
+    df = align_and_validate(sim, obs)
+    if df.empty: 
+        return np.nan
+    
+    return np.mean(df['sim'] - df['obs'])
+
+def pbias(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> float:
+    """Percent Bias."""
+    df = align_and_validate(sim, obs)
+    if df.empty: 
+        return np.nan
+    
+    sum_obs = np.sum(df['obs'])
+    if sum_obs == 0: return np.nan
+    return 100 * (np.sum(df['sim'] - df['obs']) / sum_obs)
 
 def calculate_all(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> Dict[str, float]:
     """Convenience function to return a dict of all metrics."""
     return {
         "NSE": nse(sim, obs),
         "KGE": kge(sim, obs),
-        "RMSE": rmse(sim, obs)
+        "RMSE": rmse(sim, obs),
+        "Bias": bias(sim, obs),
+        "PBias": pbias(sim, obs)
     }
