@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import teval.io as tio
 import teval.stats as tstats
 import teval.viz.static as tviz
+import teval.viz.interactive as tinteractive
 import teval.obs.usgs as tobs
 import teval.metrics.deterministic as tmetrics
 import teval.utils as tutils
@@ -115,6 +116,22 @@ def main():
         map_file = output_dir / "map_streamflow_mean.png"
         plt.savefig(map_file)
         print(f"   Map saved to {map_file}")
+    
+    # 7. Generate Interactive Map
+    if gdf_hydro_geom is not None:
+        print("7. Generating Interactive Map...")
+        html_file = output_dir / "map_interactive.html"
+        
+        try:
+            tinteractive.map_folium(
+                gdf_hydro_geom,
+                ds_stats, 
+                var_name="streamflow_mean", 
+                time_index=-1, # Last timestep
+                output_html=str(html_file)
+            )
+        except Exception as e:
+            print(f"   Could not generate interactive map: {e}")
     
     print("\n✅ Example run completed successfully.")
 
