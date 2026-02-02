@@ -19,11 +19,11 @@ def fake_ensemble():
     
     ds = xr.Dataset(
         data_vars={
-            "streamflow": (("ensemble_member", "time"), data),
-            "velocity": (("ensemble_member", "time"), data * 10)
+            "streamflow": (("Formulation_ID", "time"), data),
+            "velocity": (("Formulation_ID", "time"), data * 10)
         },
         coords={
-            "ensemble_member": [0, 1, 2],
+            "Formulation_ID": [0, 1, 2],
             "time": [0, 1, 2, 3, 4]
         }
     )

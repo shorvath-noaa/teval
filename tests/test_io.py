@@ -48,7 +48,7 @@ def test_load_ensemble_real_files():
     
     assert isinstance(ds, xr.Dataset)
     # Check standard dimensions
-    assert "ensemble_member" in ds.dims
+    assert "Formulation_ID" in ds.dims
     assert "time" in ds.dims
     assert "feature_id" in ds.dims
     
