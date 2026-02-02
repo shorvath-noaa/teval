@@ -131,6 +131,10 @@ def map_network(gdf: gpd.GeoDataFrame,
         
     map_data = gdf_plot.merge(df_data, on='feature_id', how='inner')
     
+    if map_data.empty:
+        print("Warning: Map merge resulted in empty dataset.")
+        return
+    
     # Set custom color map
     hydro_cmap = mcolors.LinearSegmentedColormap.from_list(
         "hydro_flow", 

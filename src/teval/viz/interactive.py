@@ -30,6 +30,11 @@ def map_folium(
     gdf = gdf[['feature_id', 'geometry']]
     
     map_data = gdf.merge(df_data, on='feature_id', how='inner')
+    
+    if map_data.empty:
+        print("Warning: Map merge resulted in empty dataset")
+        return
+    
     map_data['feature_id'] = map_data['feature_id'].astype(str)
     
     # Reproject if needed
