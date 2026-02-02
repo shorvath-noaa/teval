@@ -1,7 +1,9 @@
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 import xarray as xr
 import pandas as pd
 import geopandas as gpd
+import contextily as cx
 
 def hydrograph(stats_ds: xr.Dataset, feature_id: int, var_name: str = "streamflow", ax=None, obs_series=None):
     """
@@ -88,16 +90,37 @@ def hydrograph(stats_ds: xr.Dataset, feature_id: int, var_name: str = "streamflo
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-def map_network(gdf: gpd.GeoDataFrame, stats_ds: xr.Dataset, var_name: str = "streamflow_mean", time_index: int = -1, ax=None):
+def map_network(gdf: gpd.GeoDataFrame, 
+                stats_ds: xr.Dataset, 
+                var_name: str = "streamflow_mean", 
+                time_index: int = -1, 
+                source_name: str = "Network",
+                add_basemap: bool = True,
+                basemap_provider: str= "USGSTopo",
+                ax=None):
     """
-    Plots a static choropleth map of the river network.
+    Plots a choropleth map with optional baselayer.
+    
+    Args:
+        gdf: GeoDataFrame of the river network.
+        stats_ds: Xarray Dataset containing the stats.
+        var_name: Variable to plot (e.g., 'streamflow_mean').
+        time_index: Time index to plot (-1 for last step).
+        source_name: Name for the title (e.g. filename).
+        add_basemap: Whether to download and add a background map.
+        basemap_provider: Contextily provider (e.g., cx.providers.OpenTopoMap). 
+                          If None, defaults to OpenTopoMap.
+        ax: Matplotlib axes.
     """
     if ax is None:
         ax = plt.gca()
 
     # 1. Select specific time slice
     data_slice = stats_ds.isel(time=time_index)
-    
+    # Extract Timestamp string
+    raw_time = data_slice.time.values
+    time_str = str(pd.to_datetime(raw_time)).replace("T", " ")
+        
     # 2. Convert to DataFrame for merging
     df_data = data_slice[var_name].to_dataframe().reset_index()
     
@@ -109,15 +132,33 @@ def map_network(gdf: gpd.GeoDataFrame, stats_ds: xr.Dataset, var_name: str = "st
         
     map_data = gdf_plot.merge(df_data, on='feature_id', how='inner')
     
+    # Set custom color map
+    hydro_cmap = mcolors.LinearSegmentedColormap.from_list(
+        "hydro_flow", 
+        ["white", "lightskyblue", "skyblue", "deepskyblue", "dodgerblue", "blue"]
+    )
+    
     # 4. Plot
     map_data.plot(
         column=var_name,
         ax=ax,
         legend=True,
-        cmap='viridis',
-        linewidth=2,
-        legend_kwds={'label': var_name, 'shrink': 0.6}
+        cmap=hydro_cmap,
+        linewidth=3,
+        alpha=0.9,
+        legend_kwds={'label': "Streamflow (cms)", 'shrink': 0.7}
     )
     
+    if add_basemap:
+        basemap_dict = {
+            "OpenTopoMap": cx.providers.OpenTopoMap,
+            "CartoDBPositron": cx.providers.CartoDB.Positron,
+            "USGSTopo": cx.providers.USGS.USTopo
+        }
+        if basemap_provider is None:
+            # Default to OpenTopoMap if not specified
+            basemap_provider = cx.providers.USGS.USTopo 
+        cx.add_basemap(ax, crs=map_data.crs, source=basemap_dict.get(basemap_provider, cx.providers.OpenTopoMap))
+    
     ax.set_axis_off()
-    ax.set_title(f"Map: {var_name} (Time Step {time_index})")
+    ax.set_title(f"{source_name} | {time_str} | {var_name}", fontsize=12)

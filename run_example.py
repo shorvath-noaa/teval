@@ -16,7 +16,7 @@ def main():
     output_dir = Path("output")
     output_dir.mkdir(exist_ok=True)
     
-    # 2. Load Data (Adjust pattern to match your actual filenames)
+    # 2. Load Data
     print("1. Loading Troute Output Data...")
     try:
         # Matches any .nc file in data/
@@ -33,6 +33,7 @@ def main():
         gpkg_files = list(data_dir.glob("*.gpkg"))
         if gpkg_files:
             gdf_hydro = tio.load_hydrofabric(gpkg_files[0], layer='flowpath-attributes')
+            gdf_hydro_geom = tio.load_hydrofabric(gpkg_files[0], layer='flowpaths')
             print(f"   Loaded hydrofabric: {gpkg_files[0].name}")
         else:
             print("   No .gpkg file found. Skipping observation lookup.")
@@ -84,15 +85,36 @@ def main():
             print("   No data available from USGS for this period.")
     else:
         print("   No USGS gage found nearby.")
-            
-            
     
+    # Plot Hydrograph
     fig, ax = plt.subplots(figsize=(10, 6))
     tviz.hydrograph(ds_stats, feature_id=target_id, ax=ax, obs_series=obs_series)
     
     plot_file = output_dir / f"hydrograph_{target_id}.png"
     plt.savefig(plot_file)
-    print(f"   Plot saved to {plot_file}")
+    print(f"   Hydrograph saved.")
+    
+    # Plot Map
+    if gdf_hydro_geom is not None:
+        print("6. Generating Map...")
+        fig, ax = plt.subplots(figsize=(10, 10))
+        gpkg_name = gpkg_files[0].with_suffix('').name
+        
+        # Map the results
+        tviz.map_network(
+            gdf_hydro_geom, 
+            ds_stats, 
+            var_name="streamflow_mean", 
+            time_index=-1, # Last timestep
+            source_name=gpkg_name,
+            add_basemap=True,
+            basemap_provider="USGSTopo",
+            ax=ax
+        )
+        
+        map_file = output_dir / "map_streamflow_mean.png"
+        plt.savefig(map_file)
+        print(f"   Map saved to {map_file}")
     
     print("\n✅ Example run completed successfully.")
 
