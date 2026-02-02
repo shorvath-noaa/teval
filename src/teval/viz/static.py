@@ -20,15 +20,18 @@ def hydrograph(stats_ds: xr.Dataset, feature_id: int, var_name: str = "streamflo
     # 2. Extract calculated stats variables
     # Check if specific var exists (e.g. streamflow_mean) or if the user passed the suffix already
     if f"{var_name}_mean" in data:
-        mean = data[f"{var_name}_mean"]
-        median = data[f"{var_name}_median"]
-        p05 = data[f"{var_name}_p05"]
-        p95 = data[f"{var_name}_p95"]
+        mean = data[f"{var_name}_mean"].values.flatten()
+        median = data[f"{var_name}_median"].values.flatten()
+        p05 = data[f"{var_name}_p05"].values.flatten()
+        p95 = data[f"{var_name}_p95"].values.flatten()
     else:
         # Fallback: maybe the user passed a dataset that is already just streamflow stats?
         # This makes it safer if names vary
-        mean = data["mean"] if "mean" in data else data
-        median = data["median"] if "median" in data else data
+        mean = data["mean"].values.flatten() if "mean" in data else data.values.flatten()
+        median = data["median"].values.flatten() if "median" in data else data.values.flatten()
+        # Handle case where p05/p95 might not exist (e.g. single member)
+        p05 = data["p05"].values.flatten() if "p05" in data else mean
+        p95 = data["p95"].values.flatten() if "p95" in data else mean
         
     # 3. Handle Time Index
     # Check if the time is already a datetime object
@@ -52,12 +55,31 @@ def hydrograph(stats_ds: xr.Dataset, feature_id: int, var_name: str = "streamflo
     
     # Optional: Observations
     if obs_series is not None:
+        # Check if plot times are tz-aware (e.g. UTC) vs naive
+        plot_tz = None
+        if hasattr(times, 'tz'): plot_tz = times.tz
+        elif hasattr(times, 'dtype') and hasattr(times.dtype, 'tz'): plot_tz = times.dtype.tz
+        elif len(times) > 0 and hasattr(times[0], 'tzinfo'): plot_tz = times[0].tzinfo
+        
+        obs_tz = obs_series.index.tz
+        
+        # If mismatch, convert obs to match plot
+        if obs_tz is not None and plot_tz is None:
+            obs_series = obs_series.tz_convert(None)
+        elif obs_tz is None and plot_tz is not None:
+            obs_series = obs_series.tz_localize(plot_tz)
+
         # Slice obs to match plot range
         try:
-            obs_sub = obs_series.loc[times[0]:times[-1]]
-            ax.plot(obs_sub.index, obs_sub.values, 'k.', markersize=4, label='Observations')
-        except:
-            print("Warning: Could not align observations with plot times.")
+            # Use string slicing for robustness
+            start_str = str(pd.to_datetime(times[0]))
+            end_str = str(pd.to_datetime(times[-1]))
+            obs_sub = obs_series.loc[start_str:end_str]
+            
+            if not obs_sub.empty:
+                ax.plot(obs_sub.index, obs_sub.values, 'k.', markersize=4, label='Observations', zorder=10)
+        except Exception as e:
+            print(f"Warning: Could not align observations with plot times: {e}")
     
     # Formatting
     ax.set_title(f"Ensemble Hydrograph: Feature {feature_id}")
