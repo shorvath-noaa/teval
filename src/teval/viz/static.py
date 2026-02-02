@@ -27,8 +27,7 @@ def hydrograph(stats_ds: xr.Dataset, feature_id: int, var_name: str = "streamflo
         p05 = data[f"{var_name}_p05"].values.flatten()
         p95 = data[f"{var_name}_p95"].values.flatten()
     else:
-        # Fallback: maybe the user passed a dataset that is already just streamflow stats?
-        # This makes it safer if names vary
+        # Fallback
         mean = data["mean"].values.flatten() if "mean" in data else data.values.flatten()
         median = data["median"].values.flatten() if "median" in data else data.values.flatten()
         # Handle case where p05/p95 might not exist (e.g. single member)
@@ -156,7 +155,7 @@ def map_network(gdf: gpd.GeoDataFrame,
             "USGSTopo": cx.providers.USGS.USTopo
         }
         if basemap_provider is None:
-            # Default to OpenTopoMap if not specified
+            # Default to USGSTopoMap if not specified
             basemap_provider = cx.providers.USGS.USTopo 
         cx.add_basemap(ax, crs=map_data.crs, source=basemap_dict.get(basemap_provider, cx.providers.OpenTopoMap))
     
