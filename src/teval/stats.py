@@ -1,6 +1,6 @@
 import xarray as xr
 
-def calculate_basics(ds: xr.Dataset, dim: str = "ensemble_member") -> xr.Dataset:
+def calculate_basics(ds: xr.Dataset, dim: str = "Formulation_ID") -> xr.Dataset:
     """
     Collapses the ensemble dimension into summary statistics.
     Returns a dataset with suffix vars: _mean, _median, _std, _p5, _p95
