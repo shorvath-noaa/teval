@@ -4,15 +4,25 @@ import pandas as pd
 import xarray as xr
 from typing import Union, Dict
 
-def align_and_validate(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> pd.DataFrame:
+def align_and_validate(sim: Union[pd.DataFrame, pd.Series, xr.DataArray], 
+                       obs: Union[pd.DataFrame, pd.Series]) -> pd.DataFrame:
     """
     Aligns simulation and observation data by time index.
-    Removes NaNs from both series to ensure fair comparison.
+    Standardizes inputs to DataFrames, handles timezone mismatches,
+    and performs an inner join on the timestamp.
     """
-    # Convert xarray to pandas if needed
+    # Standardize Sim to Series
     if isinstance(sim, xr.DataArray):
-        sim = sim.to_series()
+        sim = sim.squeeze.to_pandas()
+    elif isinstance(sim, pd.DataFrame):
+        sim = sim.iloc[:, 0]
 
+    sim.index = sim.index.droplevel('feature_id')
+    
+    #  Standardize Obs to Series
+    if isinstance(obs, pd.DataFrame):
+        obs = obs.iloc[:, 0]
+    
     # Force timezone alignment if one is TZ-aware and other is not
     # We default to removing timezone info for comparison if they mismatch
     if sim.index.tz is not None and obs.index.tz is None:
@@ -21,7 +31,16 @@ def align_and_validate(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> p
         obs = obs.tz_convert(None)
     elif sim.index.tz != obs.index.tz:
         sim = sim.tz_convert(obs.index.tz)
+    
+    # Resample Obs to match Sim
+    if not sim.empty and not obs.empty:
+        sim_freq = (sim.index[1] - sim.index[0]).total_seconds()
+        obs_freq = (obs.index[1] - obs.index[0]).total_seconds()
         
+        if obs_freq < sim_freq:
+            # Resample Obs to hourly mean to match Sim
+            obs = obs.resample('1h').mean()
+    
     # Align indices (inner join on time)
     # This handles mismatched start/end dates automatically
     df = pd.DataFrame({'sim': sim, 'obs': obs}).dropna()
