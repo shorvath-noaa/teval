@@ -7,7 +7,7 @@ from typing import List, Union
 
 def load_ensemble(
     file_pattern: str, 
-    concat_dim: str = "ensemble_member"
+    concat_dim: str = "Formulation_ID"
 ) -> xr.Dataset:
     """
     Loads ensemble NetCDF files serially (no Dask parallelization) to avoid 
@@ -26,21 +26,23 @@ def load_ensemble(
     if not files:
         raise FileNotFoundError(f"No files found matching pattern: {file_pattern}")
         
-    print(f"Found {len(files)} ensemble files. Loading serially...")
+    print(f"Found {len(files)} formulation files")
     
     datasets = []
     
     # 2. Loop through and open each file
     for i, f in enumerate(files):
         try:
-            # open_dataset is lazy by default (reads header, not data)
             ds = xr.open_dataset(f)
             
-            # If the files don't already have an 'ensemble_member' coordinate,
-            # we can add it on the fly so they stack correctly.
-            if concat_dim not in ds.coords:
-                ds = ds.expand_dims({concat_dim: [i]})
+            # Use attribute if available, otherwise try filename or index
+            if concat_dim in ds.attrs:
+                member_id = int(ds.attrs["Formulation_ID"])
+            else:
+                print(f"Warning: 'Formulation_ID' missing in {f}. Defaulting to 0.")
+                member_id = 0
                 
+            ds = ds.expand_dims({concat_dim: [member_id]})
             datasets.append(ds)
             
         except Exception as e:
@@ -50,7 +52,6 @@ def load_ensemble(
         raise RuntimeError("Could not load any valid NetCDF files.")
 
     # 3. Concatenate into one object
-    # This keeps the underlying file handles open but doesn't read values yet
     combined_ds = xr.concat(datasets, dim=concat_dim)
     
     # Standardize coordinate names if necessary
