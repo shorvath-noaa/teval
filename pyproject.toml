@@ -24,14 +24,16 @@ dependencies = [
     "pandas",
     "scipy",
     "netCDF4",
-    "h5py",
     "xarray",
     "geopandas",
     "matplotlib",
     "contextily",
     "folium",
     "dataretrieval",
-    "shapely"
+    "shapely",
+    "PyYAML",
+    "pydantic>=2.0",
+    "Pillow"
 ]
 
 [project.optional-dependencies]

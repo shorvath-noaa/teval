@@ -2,12 +2,14 @@ numpy>=1.26.0
 pandas>=2.0.0
 xarray
 netCDF4
-h5py
+shapely
 geopandas
 matplotlib
 scipy
 contextily
 folium
 dataretrieval
-shapely
-hvplot
+PyYAML>=6.0
+pydantic>=2.0
+Pillow
+pytest
