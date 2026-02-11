@@ -136,4 +136,3 @@ def save_ensemble_stats(ds: xr.Dataset, output_path: str):
     encoding = {var: {'zlib': True, 'complevel': 5} for var in ds.data_vars}
     
     ds.to_netcdf(output_path, encoding=encoding)
-    print("Save complete.")
