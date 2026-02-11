@@ -1,19 +1,22 @@
 import xarray as xr
 
-def calculate_basics(ds: xr.Dataset, dim: str = "Formulation_ID") -> xr.Dataset:
+def calculate_basics(
+    ds: xr.Dataset, 
+    dim: str = "Formulation_ID",
+    lower_quantile: float = 0.05, 
+    upper_quantile: float = 0.95
+    ) -> xr.Dataset:
     """
     Collapses the ensemble dimension into summary statistics.
     Returns a dataset with suffix vars: _mean, _median, _std, _p5, _p95
     """
-    print("Calculating ensemble statistics...")
-    
     # Define aggregations
     stats = {
         'mean': ds.mean(dim=dim),
         'median': ds.median(dim=dim),
         'std': ds.std(dim=dim),
-        'p05': ds.quantile(0.05, dim=dim).drop_vars("quantile", errors="ignore"), # 5th percentile (Lower bound)
-        'p95': ds.quantile(0.95, dim=dim).drop_vars("quantile", errors="ignore")  # 95th percentile (Upper bound)
+        'p05': ds.quantile(lower_quantile, dim=dim).drop_vars("quantile", errors="ignore"), 
+        'p95': ds.quantile(upper_quantile, dim=dim).drop_vars("quantile", errors="ignore")
     }
     
     # Merge and rename
