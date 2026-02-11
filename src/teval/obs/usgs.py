@@ -64,8 +64,6 @@ def fetch_usgs_streamflow(
     
     if isinstance(site_ids, str):
         site_ids = [site_ids]
-        
-    print(f"Fetching USGS data for {len(site_ids)} sites from {start_date} to {end_date}...")
     
     try:
         df_flow = nwis.get_record(
