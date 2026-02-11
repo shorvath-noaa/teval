@@ -88,6 +88,5 @@ def map_folium(
     # Save
     if output_html:
         m.save(output_html)
-        print(f"   Interactive map saved to {output_html}")
         
     return m
