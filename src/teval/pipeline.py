@@ -103,8 +103,6 @@ def run_pipeline(config: TevalConfig):
         if ds_ensemble is None:
              raise ValueError("Stats calculation enabled but ensemble data not loaded.")
         logger.info("Calculating Ensemble Statistics...")
-        # Note: We should pass quantiles here eventually if calculate_basics supported it
-        # For now, we assume standard stats are calculated.
         ds_stats = tstats.calculate_basics(ds_ensemble)
         logger.info(f"Saving statistics to {stats_path}...")
         ds_stats.to_netcdf(stats_path)
@@ -182,7 +180,7 @@ def run_pipeline(config: TevalConfig):
                     plot_uncertainty=viz.hydrographs.plot_uncertainty,
                     plot_members=viz.hydrographs.plot_members,
                     ensemble_ds=ds_ensemble,
-                    quantiles=stats_cfg.quantiles # <--- PASS QUANTILES HERE
+                    quantiles=stats_cfg.quantiles
                 )
                 fig.savefig(hydro_dir / f"hydrograph_{fid}.png")
                 plt.close(fig)
