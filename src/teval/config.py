@@ -19,6 +19,10 @@ class IOConfig(BaseModel):
         default="troute_output_formulation_*.nc", 
         description="Glob pattern to match NetCDF ensemble member files within input_dir."
     )
+    stats_file: Path = Field(
+        default=Path("ensemble_stats.nc"),
+        description="Filename for the pre-calculated ensemble statistics. Used to cache results."
+    )
     hydrofabric_path: Optional[Path] = Field(
         default=None, 
         description="Path to the specific hydrofabric GeoPackage (.gpkg). If null, auto-detects first .gpkg in input_dir."
@@ -30,6 +34,10 @@ class IOConfig(BaseModel):
     auto_download_usgs: bool = Field(
         default=False,
         description="If True and observations_file is missing/null, download data from USGS for all gages in the domain."
+    )
+    save_downloaded_obs: Optional[Path] = Field(
+        default=None,
+        description="If provided, auto-downloaded USGS data will be saved to this specific path (e.g., 'data/usgs_cache.csv'). If null, data is not saved."
     )
 
     @field_validator("input_dir", "output_dir")
@@ -49,6 +57,10 @@ class DataConfig(BaseModel):
 
 class StatsConfig(BaseModel):
     """Configuration for statistical calculations."""
+    enabled: bool = Field(
+        default=True,
+        description="Whether to calculate statistics from the ensemble files. If False, the pipeline attempts to load pre-calculated stats from 'stats_file'."
+    )
     quantiles: List[float] = Field(
         default=[0.05, 0.95], 
         description="Quantiles to calculate for uncertainty bands (0.0 to 1.0)."
@@ -66,12 +78,20 @@ class StatsConfig(BaseModel):
 
 class HydrographConfig(BaseModel):
     """Settings for Hydrograph plots."""
-    enabled: bool = Field(True, description="Whether to generate hydrograph plots.")
+    enabled: bool = Field(
+        default=True, 
+        description="Whether to generate hydrograph plots.")
     target_ids: List[int] = Field(
         default=[], 
         description="Specific Feature IDs to plot. If empty, the pipeline plots the first 5 found."
     )
-    plot_uncertainty: bool = Field(True, description="Include shaded uncertainty bands in the plot.")
+    plot_uncertainty: bool = Field(
+        default=True, 
+        description="Include shaded uncertainty bands in the plot.")
+    plot_members: bool = Field(
+        default=False,
+        description="If True, plots each individual ensemble member trace in a light color (spaghetti plot)."
+    )
 
 class StaticMapConfig(BaseModel):
     """Settings for static map generation."""
