@@ -34,15 +34,12 @@ def hydrograph(
     # 2. Extract Stats
     # Helper to retrieve data safely
     def get_flat(key, default=None):
-        # Priority 1: "{var_name}_{key}" (e.g. streamflow_mean)
         if f"{var_name}_{key}" in data:
             return data[f"{var_name}_{key}"].values.flatten()
-        # Priority 2: "{key}" (e.g. mean)
         elif key in data:
             return data[key].values.flatten()
         return default
 
-    # FIX: Removed 'data.values.flatten()' default which caused the crash
     mean = get_flat("mean")
     median = get_flat("median")
     
