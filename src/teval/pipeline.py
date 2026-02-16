@@ -110,6 +110,16 @@ def run_pipeline(config: TevalConfig):
         if stats_path.exists():
             logger.info(f"Loading pre-calculated statistics from {stats_path}...")
             ds_stats = xr.open_dataset(stats_path)
+            if data.time_slice:
+                try:
+                    start, end = data.time_slice
+                    if isinstance(start, int):
+                        ds_stats = ds_stats.isel(time=slice(start, end))
+                    else:
+                        ds_stats = ds_stats.sel(time=slice(str(start), str(end)))
+                    logger.info(f"Time subset applied to stats: {len(ds_stats.time)} steps.")
+                except Exception as e:
+                    logger.warning(f"Could not apply time_slice to loaded stats: {e}")
         else:
             msg = f"Stats calculation disabled, but {stats_path} does not exist."
             logger.error(msg)
