@@ -5,7 +5,7 @@ import xarray as xr
 import matplotlib.pyplot as plt
 import teval.obs.usgs as tobs
 import teval.io as tio
-import teval.stats as tstats
+from teval.ensemble import SimpleEnsembler
 import teval.viz.static as tviz
 import teval.viz.interactive as tinteractive
 import teval.viz.animation as tanim
@@ -103,7 +103,10 @@ def run_pipeline(config: TevalConfig):
         if ds_ensemble is None:
              raise ValueError("Stats calculation enabled but ensemble data not loaded.")
         logger.info("Calculating Ensemble Statistics...")
-        ds_stats = tstats.calculate_basics(ds_ensemble)
+        # Instantiate the ensemble method
+        ensembler = SimpleEnsembler(quantiles=stats_cfg.quantiles)
+        # Calculate
+        ds_stats = ensembler.process(ds_ensemble)
         logger.info(f"Saving statistics to {stats_path}...")
         ds_stats.to_netcdf(stats_path)
     else:
