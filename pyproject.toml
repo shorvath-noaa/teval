@@ -33,7 +33,8 @@ dependencies = [
     "shapely",
     "PyYAML",
     "pydantic>=2.0",
-    "Pillow"
+    "Pillow",
+    "pyarrow"
 ]
 
 [project.optional-dependencies]

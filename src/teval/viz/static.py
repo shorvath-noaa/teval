@@ -6,6 +6,8 @@ import pandas as pd
 import geopandas as gpd
 import numpy as np
 import contextily as cx
+from typing import Optional
+from pathlib import Path
 
 def hydrograph(
     stats_ds: xr.Dataset, 
@@ -182,9 +184,8 @@ def map_network(gdf: gpd.GeoDataFrame,
     df_data = data_slice[var_name].to_dataframe().reset_index()
     
     gdf_plot = gdf.copy()
-    if 'feature_id' not in gdf_plot.columns:
-        gdf_plot = gdf_plot.reset_index() 
-        
+    gdf_plot = gdf_plot.reset_index().rename(columns={"id": "feature_id"})
+
     map_data = gdf_plot.merge(df_data, on='feature_id', how='inner')
     
     if map_data.empty:
@@ -193,7 +194,7 @@ def map_network(gdf: gpd.GeoDataFrame,
     
     hydro_cmap = mcolors.LinearSegmentedColormap.from_list(
         "hydro_flow", 
-        ["white", "lightskyblue", "skyblue", "deepskyblue", "dodgerblue", "blue"]
+        ["lightskyblue", "skyblue", "deepskyblue", "dodgerblue", "blue"]
     )
     
     map_data.plot(
@@ -218,3 +219,208 @@ def map_network(gdf: gpd.GeoDataFrame,
     
     ax.set_axis_off()
     ax.set_title(f"{source_name} | {time_str} | {var_name}", fontsize=12)
+
+def map_metrics(
+    metrics_df: pd.DataFrame, 
+    variable: str = "nse", 
+    output_path: Optional[Path] = None,
+    add_basemap: bool = True,
+    cmap: str = "RdYlBu",
+    marker_size: int = 25,
+    title: str = None
+):
+    """
+    Plots a domain-wide scatter map from a metrics CSV containing lat/lon columns.
+    
+    Args:
+        csv_path: Path to the aggregated metrics.csv.
+        variable: Column name to visualize (e.g., 'nse', 'kge', 'sig_class').
+        output_path: Where to save the PNG.
+    """
+    # Filter rows with no geometry
+    if 'lat' not in metrics_df.columns or 'lon' not in metrics_df.columns:
+        raise ValueError("CSV missing 'lat' or 'lon' columns. Cannot plot map.")
+    
+    df = metrics_df.dropna(subset=['lat', 'lon', variable])
+    
+    if df.empty:
+        print(f"No valid data found for variable '{variable}'. Skipping map.")
+        return
+
+    # Convert to GeoDataFrame
+    gdf = gpd.GeoDataFrame(
+        df, geometry=gpd.points_from_xy(df.lon, df.lat), crs="EPSG:4326"
+    )
+    
+    # Setup Plot
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    # Handle Categorical vs Continuous data
+    if variable == "sig_class":
+        # Custom color mapping for significance
+        color_map = {
+            'skillful': 'blue', 
+            'unskillful': 'red', 
+            'indeterminate': 'gray',
+            'insufficient_data': 'lightgray'
+        }
+        # Plot each category manually for a nice legend
+        for cat, color in color_map.items():
+            subset = gdf[gdf[variable] == cat]
+            if not subset.empty:
+                ax.scatter(
+                    subset.geometry.x, subset.geometry.y, 
+                    c=color, label=cat.title(), s=marker_size, edgecolors='k', linewidth=0.5, zorder=5
+                )
+        ax.legend(title="Hypothesis Test")
+        
+    else:
+        # Continuous Plot (NSE, KGE)
+        gdf = gdf.to_crs(epsg=3857)
+        gdf.plot(
+            column=variable, 
+            ax=ax, 
+            cmap=cmap, 
+            legend=True, 
+            markersize=marker_size,
+            edgecolor='k',
+            linewidth=0.3,
+            legend_kwds={'label': variable.upper(), 'shrink': 0.7},
+            zorder=5
+        )
+
+    # Basemap
+    if add_basemap:
+        if gdf.crs.to_string() != "EPSG:3857":
+            gdf = gdf.to_crs(epsg=3857)
+            # Re-set bounds based on data
+            ax.set_xlim(gdf.total_bounds[0], gdf.total_bounds[2])
+            ax.set_ylim(gdf.total_bounds[1], gdf.total_bounds[3])
+            
+        cx.add_basemap(ax, source=cx.providers.CartoDB.Positron)
+
+    ax.set_axis_off()
+    if title:
+        ax.set_title(title, fontsize=14)
+    else:
+        ax.set_title(f"Domain Metric: {variable}", fontsize=14)
+
+    if output_path:
+        plt.savefig(output_path, bbox_inches='tight', dpi=150)
+        print(f"Map saved to {output_path}")
+        plt.close(fig)
+
+def plot_metric_with_significance(
+    gdf: gpd.GeoDataFrame,
+    metric_name: str,
+    sig_column: str,
+    output_path: Path,
+    cmap: str = "RdYlBu",
+    marker_size: int = 60
+):
+    """
+    Plots a map where:
+    - Color = Metric Value (Continuous)
+    - Shape/Edge = Significance Class (Categorical)
+    
+    Shapes:
+    - Skillful: Circle (o)
+    - Unskillful: X (X)
+    - Indeterminate: Square (s)
+    - Insufficient Data: Triangle Down (v)
+    """
+    if gdf.empty or metric_name not in gdf.columns:
+        print(f"Skipping map for {metric_name}: No data found.")
+        return
+
+    # 1. Setup Plot
+    fig, ax = plt.subplots(figsize=(12, 10))
+    
+    # Reproject for basemap
+    if gdf.crs is not None and gdf.crs.to_string() != "EPSG:3857":
+        gdf = gdf.to_crs(epsg=3857)
+    elif gdf.crs is None:
+        gdf = gdf.set_crs(epsg=4326).to_crs(epsg=3857)
+
+    # 2. Define Value Ranges (Centering for NSE/KGE)
+    vmin, vmax = None, None
+    if metric_name.lower() in ['nse', 'kge', 'kge_2012']:
+        # Center colormap at 0, clamp at -1 to 1 for visual clarity
+        vmin, vmax = -1, 1
+    
+    # 3. Define Significance Styles
+    markers = {
+        'skillful': 'o',      
+        'unskillful': 'X',    
+        'indeterminate': 's', 
+        'insufficient_data': 'v' 
+    }
+    
+    # 4. Plot Loop (One scatter call per marker type to handle shapes)
+    unique_types = gdf[sig_column].unique()
+    
+    sc = None
+    for sig_type in unique_types:
+        subset = gdf[gdf[sig_column] == sig_type]
+        if subset.empty: continue
+        
+        marker = markers.get(sig_type, 'o')
+        
+        # Skillful gets a bold edge, others get thinner/gray edge
+        edge_color = 'black'
+        line_width = 1.0
+        
+        # Plot
+        sc = ax.scatter(
+            subset.geometry.x, subset.geometry.y,
+            c=subset[metric_name],
+            cmap=cmap,
+            vmin=vmin, vmax=vmax,
+            s=marker_size,
+            marker=marker,
+            edgecolors=edge_color,
+            linewidth=line_width,
+            label=sig_type.title(), 
+            zorder=5
+        )
+
+    # 5. Colorbar (Metric Value)
+    if sc:
+        divider = make_axes_locatable(ax)
+        cax = divider.append_axes("right", size="3%", pad=0.1)
+        cbar = plt.colorbar(sc, cax=cax)
+        cbar.set_label(metric_name.upper(), fontsize=12)
+
+    # 6. Legend (Significance Class)
+    # Manually create handles for the shapes so they show up black/gray in legend
+    legend_handles = []
+    for sig_type, marker in markers.items():
+        # Only add to legend if it exists in the data
+        if sig_type in unique_types:
+            h = plt.Line2D(
+                [], [], color='white', marker=marker, 
+                markerfacecolor='gray', markeredgecolor='black', 
+                markersize=10, label=sig_type.title()
+            )
+            legend_handles.append(h)
+            
+    if legend_handles:
+        ax.legend(
+            handles=legend_handles, 
+            loc='lower left', 
+            title="Hypothesis Test",
+            frameon=True
+        )
+
+    # 7. Basemap & Polish
+    try:
+        cx.add_basemap(ax, source=cx.providers.CartoDB.Positron)
+    except Exception:
+        pass
+        
+    ax.set_axis_off()
+    ax.set_title(f"Metric: {metric_name.upper()} & Significance", fontsize=15)
+    
+    plt.savefig(output_path, bbox_inches='tight', dpi=150)
+    print(f"Map saved to {output_path}")
+    plt.close(fig)

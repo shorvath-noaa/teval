@@ -2,7 +2,7 @@
 
 **teval** is a Python library and command-line tool designed to streamline the evaluation of NextGen t-route ensemble outputs. It automates reading NetCDF ensemble files, calculating statistical summaries, and generating visualizations.
 
-## 🌟 Key Features
+## Key Features
 * **Config-Driven Workflow:** Control everything via a simple YAML configuration file.
 * **Smart Caching:** Calculates ensemble statistics once, saves them to disk, and reuses them for rapid visualization.
 * **Ensemble Analysis:** Automatically computes mean, median, and user-defined uncertainty quantiles (e.g., 5th/95th).
@@ -12,7 +12,7 @@
     * **Animations:** Generate time-series GIFs of streamflow across the network.
 * **USGS Integration:** Auto-fetches and caches USGS gage observations for validation metrics.
 
-## 📦 Installation
+## Installation
 
 1.  **Clone the repository:**
     ```bash
@@ -32,7 +32,7 @@
     pip install .
     ```
 
-## 🚀 Quick Start (Command Line)
+## Quick Start (Command Line)
 
 The easiest way to use `teval` is through the command line interface (CLI).
 
@@ -73,7 +73,7 @@ View a description of every confiuration parameter:
 python -m teval --help-config
 ```
 
-## 📖 Python API Usage
+## Python API Usage
 You can also use `teval` as a library within your own scripts or notebooks:
 ``` python
 from teval.config import TevalConfig
@@ -90,7 +90,7 @@ config.viz.hydrographs.plot_members = True
 run_pipeline(config)
 ```
 
-## 📂 Output Structure
+## Output Structure
 The tool organizes results automatically:
 ```bash
 output/
@@ -104,7 +104,7 @@ output/
 └── animation_streamflow_mean.gif
 ```
 
-## 🧪 Testing
+## Testing
 Run the test suite to ensure everything is working correctly:
 ```bash
 pytest

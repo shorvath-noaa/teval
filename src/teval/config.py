@@ -7,9 +7,24 @@ from pydantic import BaseModel, Field, field_validator
 # Define Sub-Models for Sections
 class IOConfig(BaseModel):
     """Configuration for Input/Output paths and file patterns."""
-    input_dir: Path = Field(
+    
+    
+    #TODO: UPDATE THIS FOR SPECIFIC CALIBRATION OUTPUT DIRECTORY STRUCTURE
+    
+    troute_netcdf_dir: Path = Field(
+        default=None, 
+        description="Directory where all t-route output files are stored. These will be loaded to calculate ensemble statistics."
+    )
+    ensemble_netcdf_dir: Path = Field(
+        default=None, 
+        description="Directory where all pre-computed ensemble files are stored."
+    )
+    
+    
+    
+    input_dir: Union[Path, str, List[Path]] = Field(
         default=Path("data"), 
-        description="Directory containing input NetCDF ensemble files and other input data."
+        description="Path to input data. Can be: 1) A single directory, 2) A glob pattern string (e.g. 'runs/basin_*'), or 3) A list of directories."
     )
     output_dir: Path = Field(
         default=Path("output"), 
@@ -25,11 +40,15 @@ class IOConfig(BaseModel):
     )
     hydrofabric_path: Optional[Path] = Field(
         default=None, 
-        description="Path to the specific hydrofabric GeoPackage (.gpkg). If null, auto-detects first .gpkg in input_dir."
+        description="Path to the specific hydrofabric GeoPackage (.gpkg)."
+    )
+    hydrofabric_dir: Path = Field(
+        default=Path("data/domain"),
+        description="Directory containing the hydrofabric geopackages (e.g. 'gage_10023000.gpkg')."
     )
     observations_file: Optional[Path] = Field(
         default=None, 
-        description="Path to a CSV file containing USGS observations for validation."
+        description="Path to a file containing observations for validation. Supports .csv or .parquet."
     )
     auto_download_usgs: bool = Field(
         default=False,
@@ -40,10 +59,26 @@ class IOConfig(BaseModel):
         description="If provided, auto-downloaded USGS data will be saved to this specific path (e.g., 'data/usgs_cache.csv'). If null, data is not saved."
     )
 
-    @field_validator("input_dir", "output_dir")
+    @field_validator("input_dir")
+    def validate_input_dir(cls, v):
+        if isinstance(v, str):
+            if "*" in v:
+                return v
+            return Path(v)
+        return v
+    
+    @field_validator("output_dir")
     def convert_to_path(cls, v):
         return Path(v) if v else v
 
+class SystemConfig(BaseModel):
+    """Configuration for system resources."""
+    cpu: int = Field(
+        default=1,
+        ge=1,
+        description="Number of processes to use for parallel data loading. Set to >1 to enable parallel mode."
+    )
+    
 class DataConfig(BaseModel):
     """Configuration for data slicing and subsetting."""
     time_slice: Optional[List[Union[int, str]]] = Field(
@@ -65,10 +100,6 @@ class StatsConfig(BaseModel):
         default=[0.05, 0.95], 
         description="Quantiles to calculate for uncertainty bands (0.0 to 1.0)."
     )
-    metrics: List[str] = Field(
-        default=["kge", "nse", "rmse"], 
-        description="List of performance metrics to calculate against observations."
-    )
 
     @field_validator("quantiles")
     def validate_quantiles(cls, v):
@@ -76,6 +107,37 @@ class StatsConfig(BaseModel):
             raise ValueError("Quantiles must be between 0 and 1.")
         return v
 
+class MetricsConfig(BaseModel):
+    """Configuration for performance metrics and hypothesis testing."""
+    enabled: bool = Field(
+        default=False,
+        description="Whether to calculate performance metrics against observations."
+    )
+    variables: List[str] = Field(
+        default=["nse", "kge", "pbias", "peak_flow_error"],
+        description="List of deterministic metrics to calculate (e.g., 'nse', 'kge', 'pbias', 'peak_flow_error')."
+    )
+    per_formulation: bool = Field(
+        default=False,
+        description="Calculate metrics for each individual formulation in addition to the ensemble."
+    )
+    bootstrap_enabled: bool = Field(
+        default=False,
+        description="Whether to perform bootstrapping to estimate confidence intervals."
+    )
+    bootstrap_samples: int = Field(
+        default=1000,
+        description="Number of bootstrap iterations."
+    )
+    confidence_level: float = Field(
+        default=0.95,
+        description="Confidence level for the hypothesis test (e.g. 0.95 for 95% CI)."
+    )
+    metrics_output_file: Path = Field(
+        default=None,
+        description="Filename for saving calculated metrics. Saved in the output directory."
+    )
+    
 class HydrographConfig(BaseModel):
     """Settings for Hydrograph plots."""
     enabled: bool = Field(
@@ -102,6 +164,15 @@ class StaticMapConfig(BaseModel):
     )
     basemap: bool = Field(True, description="Add a contextily background map (requires internet).")
 
+class MetricsMapConfig(BaseModel):
+    """Settings for mapping performance metrics across the domain."""
+    enabled: bool = Field(True, description="Whether to generate performance metric maps.")
+    variables: List[str] = Field(
+        default=["nse", "kge", "pbias"], 
+        description="List of performance metrics to map (e.g., 'nse', 'kge', 'pbias')."
+    )
+    basemap: bool = Field(True, description="Add a contextily background map (requires internet).")
+    
 class InteractiveMapConfig(BaseModel):
     """Settings for HTML interactive maps."""
     enabled: bool = Field(True, description="Whether to generate an interactive Folium map.")
@@ -114,6 +185,17 @@ class AnimationConfig(BaseModel):
     fps: int = Field(8, ge=1, le=60, description="Frames per second for the GIF.")
     log_scale: bool = Field(True, description="Use logarithmic color scaling (recommended for streamflow).")
     cmap: str = Field("hydro_flow", description="Colormap name (e.g., 'hydro_flow', 'viridis', 'coolwarm').")
+    time_step: str = Field("1W", description="Time slicing for the GIF (e.g. '1W' for 1 week).")
+    min_stream_order: int = Field(4, description="Minimum stream order for flowpaths to include.")
+
+class PointMapConfig(BaseModel):
+    """Settings for domain-wide point maps."""
+    enabled: bool = Field(False, description="Generate static point maps from metrics.")
+    variables: List[str] = Field(
+        default=["nse", "sig_class"], 
+        description="Metrics to map (e.g. 'nse', 'kge', 'sig_class')."
+    )
+    marker_size: int = 15
 
 class VizConfig(BaseModel):
     """Visualization grouping."""
@@ -121,13 +203,16 @@ class VizConfig(BaseModel):
     static_maps: StaticMapConfig = StaticMapConfig()
     interactive_map: InteractiveMapConfig = InteractiveMapConfig()
     animation: AnimationConfig = AnimationConfig()
+    metrics_maps: MetricsMapConfig = MetricsMapConfig()
 
 # Main Config Model 
 class TevalConfig(BaseModel):
     """Root configuration object for TEVAL."""
     io: IOConfig = IOConfig()
+    system: SystemConfig = SystemConfig()
     data: DataConfig = DataConfig()
     stats: StatsConfig = StatsConfig()
+    metrics: MetricsConfig = MetricsConfig()
     viz: VizConfig = VizConfig()
 
     @classmethod
@@ -140,7 +225,6 @@ class TevalConfig(BaseModel):
         return cls(**raw)
 
 # Generators
-
 def generate_default_config(path: str = "teval_config.yaml"):
     """
     Generates a default YAML configuration file based on the Pydantic model defaults.

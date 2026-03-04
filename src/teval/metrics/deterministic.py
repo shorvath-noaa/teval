@@ -1,142 +1,81 @@
-# src/teval/metrics/deterministic.py
 import numpy as np
 import pandas as pd
-import xarray as xr
-from typing import Union, Dict
 
-def align_and_validate(sim: Union[pd.DataFrame, pd.Series, xr.DataArray], 
-                       obs: Union[pd.DataFrame, pd.Series]) -> pd.DataFrame:
-    """
-    Aligns simulation and observation data by time index.
-    Standardizes inputs to DataFrames, handles timezone mismatches,
-    and performs an inner join on the timestamp.
-    """
-    # Standardize Sim to Series
-    if isinstance(sim, xr.DataArray):
-        sim = sim.squeeze.to_pandas()
-    elif isinstance(sim, pd.DataFrame):
-        sim = sim.iloc[:, 0]
+def _validate(obs, sim):
+    """Aligns and filters NaN values."""
+    valid = np.isfinite(obs) & np.isfinite(sim)
+    return obs[valid], sim[valid]
 
-    sim.index = sim.index.droplevel('feature_id')
-    
-    #  Standardize Obs to Series
-    if isinstance(obs, pd.DataFrame):
-        obs = obs.iloc[:, 0]
-    
-    # Force timezone alignment if one is TZ-aware and other is not
-    # We default to removing timezone info for comparison if they mismatch
-    if sim.index.tz is not None and obs.index.tz is None:
-        sim = sim.tz_convert(None)
-    elif sim.index.tz is None and obs.index.tz is not None:
-        obs = obs.tz_convert(None)
-    elif sim.index.tz != obs.index.tz:
-        sim = sim.tz_convert(obs.index.tz)
-    
-    # Resample Obs to match Sim
-    if not sim.empty and not obs.empty:
-        sim_freq = (sim.index[1] - sim.index[0]).total_seconds()
-        obs_freq = (obs.index[1] - obs.index[0]).total_seconds()
-        
-        if obs_freq < sim_freq:
-            # Resample Obs to hourly mean to match Sim
-            obs = obs.resample('1h').mean()
-    
-    # Align indices (inner join on time)
-    # This handles mismatched start/end dates automatically
-    df = pd.DataFrame({'sim': sim, 'obs': obs}).dropna()
+# Standard Scores
+def _nse(obs: np.ndarray, sim: np.ndarray) -> float:
+    """Nash-Sutcliffe Efficiency."""
+    o, s = _validate(obs, sim)
+    if len(o) < 2: return np.nan
+    denom = np.sum((o - np.mean(o))**2)
+    if denom == 0: return np.nan
+    return 1 - (np.sum((o - s)**2) / denom)
 
-    if df.empty:
-        raise ValueError("No overlapping valid data between simulation and observation.")
+def _kge(obs: np.ndarray, sim: np.ndarray) -> float:
+    """Kling-Gupta Efficiency."""
+    o, s = _validate(obs, sim)
+    if len(o) < 2: return np.nan
     
-    return df
-
-def nse(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> float:
-    """
-    Nash-Sutcliffe Efficiency (NSE).
-    Range: (-inf, 1]. 1 is perfect. 0 is as good as the mean of obs.
-    """
-    df = align_and_validate(sim, obs)
-    if df.empty: 
+    mean_o, mean_s = np.mean(o), np.mean(s)
+    std_o, std_s = np.std(o), np.std(s)
+    if std_o < 1e-5 or mean_o < 1e-5 or std_s < 1e-5: 
         return np.nan
     
-    s = df['sim'].values
-    o = df['obs'].values
-    
-    numerator = np.sum((s - o) ** 2)
-    denominator = np.sum((o - np.mean(o)) ** 2)
-    
-    if denominator == 0:
-        return -np.inf # Variance of obs is zero
-        
-    return 1 - (numerator / denominator)
+    r = np.corrcoef(o, s)[0, 1]
+    alpha = std_s / std_o
+    beta = mean_s / mean_o
+    return 1 - np.sqrt((r - 1)**2 + (alpha - 1)**2 + (beta - 1)**2)
 
-def kge(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> float:
-    """
-    Kling-Gupta Efficiency (KGE).
-    Range: (-inf, 1]. 1 is perfect.
-    """
-    df = align_and_validate(sim, obs)
-    if df.empty: 
-        return np.nan
-    
-    s = df['sim'].values
-    o = df['obs'].values
-
-    # Mean and Std Dev
-    mean_s, mean_o = np.mean(s), np.mean(o)
-    std_s, std_o = np.std(s), np.std(o)
-    
-    if std_o == 0: 
-        return -np.inf
-    
-    # Components
-    r = np.corrcoef(s, o)[0, 1] # Correlation
-    alpha = std_s / std_o       # Variability ratio
-    beta = mean_s / mean_o      # Bias ratio
-    
-    # KGE formula
-    kge_val = 1 - np.sqrt((r - 1)**2 + (alpha - 1)**2 + (beta - 1)**2)
-    
-    return kge_val
-
-def rmse(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> float:
-    """
-    Root Mean Square Error.
-    Lower is better.
-    """
-    df = align_and_validate(sim, obs)
-    if df.empty: 
-        return np.nan
-    
-    s = df['sim'].values
-    o = df['obs'].values
-    
-    return np.sqrt(np.mean((s - o)**2))
-
-def bias(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> float:
-    """Mean Bias (Sim - Obs)."""
-    df = align_and_validate(sim, obs)
-    if df.empty: 
-        return np.nan
-    
-    return np.mean(df['sim'] - df['obs'])
-
-def pbias(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> float:
+def _pbias(obs: np.ndarray, sim: np.ndarray) -> float:
     """Percent Bias."""
-    df = align_and_validate(sim, obs)
-    if df.empty: 
+    o, s = _validate(obs, sim)
+    denom = np.sum(o)
+    if denom == 0: 
         return np.nan
-    
-    sum_obs = np.sum(df['obs'])
-    if sum_obs == 0: return np.nan
-    return 100 * (np.sum(df['sim'] - df['obs']) / sum_obs)
+    return 100 * np.sum(s - o) / denom if len(o) > 0 else np.nan
 
-def calculate_all(sim: Union[pd.Series, xr.DataArray], obs: pd.Series) -> Dict[str, float]:
-    """Convenience function to return a dict of all metrics."""
-    return {
-        "NSE": nse(sim, obs),
-        "KGE": kge(sim, obs),
-        "RMSE": rmse(sim, obs),
-        "Bias": bias(sim, obs),
-        "PBias": pbias(sim, obs)
+# Hydrological Signatures
+def _peak_flow_error(obs: np.ndarray, sim: np.ndarray) -> float:
+    """Percent error in Peak Flow magnitude."""
+    o_max = np.nanmax(obs)
+    s_max = np.nanmax(sim)
+    if o_max == 0: return np.nan
+    return 100 * (s_max - o_max) / o_max
+
+def _peak_timing_error(obs: pd.Series, sim: pd.Series) -> float:
+    """
+    Difference in hours between observed and simulated peak.
+    """
+    t_o = obs.idxmax()
+    t_s = sim.idxmax()
+    
+    # Calculate difference in hours
+    diff = (t_s - t_o).total_seconds() / 3600.0
+    return diff
+
+def calculate_deterministic_metric(obs: pd.Series, sim: pd.Series, metric_name: str) -> float:
+    """Wrapper to calculate a specified deterministic metric."""
+    metric_funcs = {
+        'nse': _nse,
+        'kge': _kge,
+        'pbias': _pbias,
+        'peak_flow_error': _peak_flow_error,
+        'peak_timing_error': _peak_timing_error
     }
+    
+    func = metric_funcs.get(metric_name.lower())
+    if func is None:
+        raise ValueError(f"Unsupported metric: {metric_name}")
+    
+    # peak_timing_error explicitly requires Pandas Series (for the time index)
+    if metric_name.lower() == 'peak_timing_error':
+        return func(obs, sim)
+        
+    obs_arr = obs.values if hasattr(obs, 'values') else obs
+    sim_arr = sim.values if hasattr(sim, 'values') else sim
+    
+    return func(obs_arr, sim_arr)
