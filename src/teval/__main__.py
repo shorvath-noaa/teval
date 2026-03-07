@@ -1,15 +1,15 @@
 import argparse
 import sys
-import time
+# import time
 import logging
 import pandas as pd
 import xarray as xr
 from teval.config import TevalConfig, generate_default_config, generate_config_help
 from teval import workflow
 from teval.utils import Timer
-import os
-import multiprocessing
-from dask.distributed import Client
+# import os
+# import multiprocessing
+# from dask.distributed import Client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -48,15 +48,15 @@ def main():
     config = TevalConfig.from_yaml(args.config)
     
     # DASK INITIALIZATION (Thread-safe with h5netcdf)
-    os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+    # os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
-    slurm_cores = os.environ.get("SLURM_CPUS_PER_TASK")
-    num_cores = int(slurm_cores) if slurm_cores else max(1, multiprocessing.cpu_count() - 1)
+    # slurm_cores = os.environ.get("SLURM_CPUS_PER_TASK")
+    # num_cores = int(slurm_cores) if slurm_cores else max(1, multiprocessing.cpu_count() - 1)
     
-    client = Client(processes=False, n_workers=1, threads_per_worker=num_cores)
+    # client = Client(processes=False, n_workers=1, threads_per_worker=num_cores)
     
-    logger.info(f"Initialized Dask Client with 1 worker and {num_cores} threads.")
-    logger.info(f"Dask Dashboard: {client.dashboard_link}")
+    # logger.info(f"Initialized Dask Client with 1 worker and {num_cores} threads.")
+    # logger.info(f"Dask Dashboard: {client.dashboard_link}")
     
 
     # Create domain mapping containing individual formulations, gpkg paths, USGS gage information, etc.
