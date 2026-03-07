@@ -38,7 +38,8 @@ dependencies = [
     "dask",
     "distributed",
     "h5netcdf",
-    "joblib"
+    "joblib",
+    "h5py"
 ]
 
 [project.optional-dependencies]
