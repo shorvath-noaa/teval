@@ -34,7 +34,11 @@ dependencies = [
     "PyYAML",
     "pydantic>=2.0",
     "Pillow",
-    "pyarrow"
+    "pyarrow",
+    "dask",
+    "distributed",
+    "h5netcdf",
+    "joblib"
 ]
 
 [project.optional-dependencies]
