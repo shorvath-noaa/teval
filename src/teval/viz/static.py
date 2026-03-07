@@ -1,13 +1,20 @@
+import pandas as pd
+import xarray as xr
+from pathlib import Path
+import time
+import logging
+from typing import Optional
+
+# MUST BE SET BEFORE IMPORTING PYPLOT to ensure process safety in Joblib
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.cm as cm
-import xarray as xr
-import pandas as pd
 import geopandas as gpd
 import numpy as np
 import contextily as cx
-from typing import Optional
-from pathlib import Path
+
 
 def hydrograph(
     stats_ds: xr.Dataset, 
@@ -18,14 +25,33 @@ def hydrograph(
     plot_uncertainty: bool = True,
     plot_members: bool = False,
     ensemble_ds: xr.Dataset = None,
-    quantiles: list = [0.05, 0.95]
+    quantiles: list = [0.05, 0.95],
+    metrics_df: Optional[pd.DataFrame] = None # <-- NEW ARGUMENT
 ):
     """
-    Plots mean, median, and uncertainty bounds (or individual members).
+    Plots mean, median, and uncertainty bounds (or individual members) with optional metrics.
     """
     if ax is None:
         ax = plt.gca()
         
+    # Helper to generate a clean string of metrics for the legend (e.g. "(NSE: 0.85, KGE: 0.72)")
+    def get_metrics_str(source_name: str) -> str:
+        if metrics_df is None or metrics_df.empty: return ""
+        
+        # Find the row for this specific model/source
+        row = metrics_df[metrics_df['source'].astype(str) == source_name]
+        if row.empty: return ""
+        
+        skip_cols = {'feature_id', 'gage_id', 'lat', 'lon', 'source', 'sig_class'}
+        parts = []
+        for col in row.columns:
+            if col not in skip_cols and pd.notnull(row[col].iloc[0]):
+                val = row[col].iloc[0]
+                if isinstance(val, (int, float)):
+                    parts.append(f"{col.upper()}: {val:.2f}")
+                    
+        return f" ({', '.join(parts)})" if parts else ""
+
     # 1. Select data
     try:
         data = stats_ds.sel(feature_id=feature_id)
@@ -33,8 +59,6 @@ def hydrograph(
         print(f"Error: Feature ID {feature_id} not found in dataset.")
         return
     
-    # 2. Extract Stats
-    # Helper to retrieve data safely
     def get_flat(key, default=None):
         if f"{var_name}_{key}" in data:
             return data[f"{var_name}_{key}"].values.flatten()
@@ -49,22 +73,19 @@ def hydrograph(
         print(f"Warning: Mean statistic not found for {feature_id}. Skipping plot.")
         return
 
-    # Determine Quantile Bounds dynamically
     qs = sorted(quantiles)
     if len(qs) >= 2:
         q_lower, q_upper = qs[0], qs[-1]
     else:
-        q_lower, q_upper = 0.05, 0.95 # Fallback
+        q_lower, q_upper = 0.05, 0.95 
     
-    # Format strings to match variable names (e.g. 0.05 -> "p05")
     def fmt_q(q): return f"p{int(q*100):02d}"
     
     lbl_lower, lbl_upper = fmt_q(q_lower), fmt_q(q_upper)
     
-    p_lower = get_flat(lbl_lower, mean) # Fallback to mean if missing
+    p_lower = get_flat(lbl_lower, mean)
     p_upper = get_flat(lbl_upper, mean)
 
-    # 3. Handle Time
     if pd.api.types.is_datetime64_any_dtype(data.time):
         times = data.time.values
     elif 'reference_time' in data.coords:
@@ -74,23 +95,20 @@ def hydrograph(
     else:
         times = data.time.values
     
-    # 4. Plot Individual Members (Spaghetti)
+    # 4. Plot Individual Members (Spaghetti) WITH METRICS
     if plot_members:
         if ensemble_ds is not None:
             try:
                 member_data = ensemble_ds[var_name].sel(feature_id=feature_id)
-                
-                # Case-Insensitive Dim Search
                 member_dim = None
                 dims_map = {d.lower(): d for d in member_data.dims}
-                for t in ['formulation_id', 'member', 'ensemble', 'run']:
+                for t in ['formulation_id', 'member', 'ensemble', 'run', 'formulation']:
                     if t in dims_map:
                         member_dim = dims_map[t]
                         break
                 
                 if member_dim:
                     n_members = member_data.sizes[member_dim]
-                    # Color generation
                     if n_members <= 20:
                         colors = cm.tab20(np.linspace(0, 1, n_members))
                     else:
@@ -99,9 +117,10 @@ def hydrograph(
                     for i in range(n_members):
                         trace = member_data.isel({member_dim: i}).values.flatten()
                         try:
-                            # Try to get actual Member ID
-                            mid = member_data[member_dim].values[i]
-                            lbl = f"Member {mid}"
+                            # E.g., 'model_A'
+                            mid = str(member_data[member_dim].values[i])
+                            # Pull metrics specifically for 'model_A'
+                            lbl = f"{mid}{get_metrics_str(mid)}"
                         except:
                             lbl = f"Member {i}"
 
@@ -111,27 +130,23 @@ def hydrograph(
                     print(f"Warning: Could not identify member dimension.")
             except Exception as e:
                 print(f"Warning: Could not plot members: {e}")
-        else:
-            print("Warning: 'plot_members' is True but 'ensemble_ds' was not provided.")
 
     # 5. Plot Uncertainty Band
     if plot_uncertainty and not plot_members:
-        # Calculate percentage coverage for legend
         pct = int(round(q_upper - q_lower, 2) * 100)
         band_label = f"{pct}% Uncertainty ({lbl_lower}-{lbl_upper})"
-        
         ax.fill_between(times, p_lower, p_upper, color='gray', alpha=0.3, 
                         label=band_label, zorder=2)
     
-    # 6. Central Tendencies
-    ax.plot(times, mean, 'k-', linewidth=2.5, label='Ensemble Mean', zorder=4)
+    # 6. Central Tendencies WITH METRICS
+    mean_label = f"Ensemble Mean{get_metrics_str('ensemble_mean')}"
+    ax.plot(times, mean, 'k-', linewidth=2.5, label=mean_label, zorder=4)
     
     if median is not None:
         ax.plot(times, median, 'b--', linewidth=2.0, label='Ensemble Median', zorder=4)
     
     # 7. Observations
     if obs_series is not None:
-        # Timezone Alignment
         plot_tz = None
         if hasattr(times, 'tz'): plot_tz = times.tz
         elif hasattr(times, 'dtype') and hasattr(times.dtype, 'tz'): plot_tz = times.dtype.tz
@@ -156,11 +171,11 @@ def hydrograph(
     ax.set_ylabel(var_name)
     ax.set_xlabel("Time")
     
-    # Legend
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
-    ax.legend(by_label.values(), by_label.keys(), loc='upper right', fontsize='small', ncol=2)
     
+    # Allow the legend to wrap nicely if it gets wide with metrics
+    ax.legend(by_label.values(), by_label.keys(), loc='upper center', bbox_to_anchor=(0.5, -0.15), fontsize='small', ncol=2)
     ax.grid(True, alpha=0.3)
 
 def map_network(gdf: gpd.GeoDataFrame, 
@@ -231,13 +246,7 @@ def map_metrics(
 ):
     """
     Plots a domain-wide scatter map from a metrics CSV containing lat/lon columns.
-    
-    Args:
-        csv_path: Path to the aggregated metrics.csv.
-        variable: Column name to visualize (e.g., 'nse', 'kge', 'sig_class').
-        output_path: Where to save the PNG.
     """
-    # Filter rows with no geometry
     if 'lat' not in metrics_df.columns or 'lon' not in metrics_df.columns:
         raise ValueError("CSV missing 'lat' or 'lon' columns. Cannot plot map.")
     
@@ -247,24 +256,19 @@ def map_metrics(
         print(f"No valid data found for variable '{variable}'. Skipping map.")
         return
 
-    # Convert to GeoDataFrame
     gdf = gpd.GeoDataFrame(
         df, geometry=gpd.points_from_xy(df.lon, df.lat), crs="EPSG:4326"
     )
     
-    # Setup Plot
     fig, ax = plt.subplots(figsize=(12, 8))
     
-    # Handle Categorical vs Continuous data
     if variable == "sig_class":
-        # Custom color mapping for significance
         color_map = {
             'skillful': 'blue', 
             'unskillful': 'red', 
             'indeterminate': 'gray',
             'insufficient_data': 'lightgray'
         }
-        # Plot each category manually for a nice legend
         for cat, color in color_map.items():
             subset = gdf[gdf[variable] == cat]
             if not subset.empty:
@@ -275,7 +279,6 @@ def map_metrics(
         ax.legend(title="Hypothesis Test")
         
     else:
-        # Continuous Plot (NSE, KGE)
         gdf = gdf.to_crs(epsg=3857)
         gdf.plot(
             column=variable, 
@@ -289,11 +292,9 @@ def map_metrics(
             zorder=5
         )
 
-    # Basemap
     if add_basemap:
         if gdf.crs.to_string() != "EPSG:3857":
             gdf = gdf.to_crs(epsg=3857)
-            # Re-set bounds based on data
             ax.set_xlim(gdf.total_bounds[0], gdf.total_bounds[2])
             ax.set_ylim(gdf.total_bounds[1], gdf.total_bounds[3])
             
@@ -322,33 +323,22 @@ def plot_metric_with_significance(
     Plots a map where:
     - Color = Metric Value (Continuous)
     - Shape/Edge = Significance Class (Categorical)
-    
-    Shapes:
-    - Skillful: Circle (o)
-    - Unskillful: X (X)
-    - Indeterminate: Square (s)
-    - Insufficient Data: Triangle Down (v)
     """
     if gdf.empty or metric_name not in gdf.columns:
         print(f"Skipping map for {metric_name}: No data found.")
         return
 
-    # 1. Setup Plot
     fig, ax = plt.subplots(figsize=(12, 10))
     
-    # Reproject for basemap
     if gdf.crs is not None and gdf.crs.to_string() != "EPSG:3857":
         gdf = gdf.to_crs(epsg=3857)
     elif gdf.crs is None:
         gdf = gdf.set_crs(epsg=4326).to_crs(epsg=3857)
 
-    # 2. Define Value Ranges (Centering for NSE/KGE)
     vmin, vmax = None, None
     if metric_name.lower() in ['nse', 'kge', 'kge_2012']:
-        # Center colormap at 0, clamp at -1 to 1 for visual clarity
         vmin, vmax = -1, 1
     
-    # 3. Define Significance Styles
     markers = {
         'skillful': 'o',      
         'unskillful': 'X',    
@@ -356,7 +346,6 @@ def plot_metric_with_significance(
         'insufficient_data': 'v' 
     }
     
-    # 4. Plot Loop (One scatter call per marker type to handle shapes)
     unique_types = gdf[sig_column].unique()
     
     sc = None
@@ -365,12 +354,9 @@ def plot_metric_with_significance(
         if subset.empty: continue
         
         marker = markers.get(sig_type, 'o')
-        
-        # Skillful gets a bold edge, others get thinner/gray edge
         edge_color = 'black'
         line_width = 1.0
         
-        # Plot
         sc = ax.scatter(
             subset.geometry.x, subset.geometry.y,
             c=subset[metric_name],
@@ -384,18 +370,15 @@ def plot_metric_with_significance(
             zorder=5
         )
 
-    # 5. Colorbar (Metric Value)
     if sc:
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
         divider = make_axes_locatable(ax)
         cax = divider.append_axes("right", size="3%", pad=0.1)
         cbar = plt.colorbar(sc, cax=cax)
         cbar.set_label(metric_name.upper(), fontsize=12)
 
-    # 6. Legend (Significance Class)
-    # Manually create handles for the shapes so they show up black/gray in legend
     legend_handles = []
     for sig_type, marker in markers.items():
-        # Only add to legend if it exists in the data
         if sig_type in unique_types:
             h = plt.Line2D(
                 [], [], color='white', marker=marker, 
@@ -412,7 +395,6 @@ def plot_metric_with_significance(
             frameon=True
         )
 
-    # 7. Basemap & Polish
     try:
         cx.add_basemap(ax, source=cx.providers.CartoDB.Positron)
     except Exception:

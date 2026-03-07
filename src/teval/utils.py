@@ -2,10 +2,28 @@ import geopandas as gpd
 from pathlib import Path
 from typing import Tuple, Optional
 import logging
-
+import time
 
 logger = logging.getLogger(__name__)
 
+class Timer:
+    """A simple context manager for logging block execution times."""
+    def __init__(self, name):
+        self.name = name
+
+    def __enter__(self):
+        self.start = time.time()
+        print(f"\n==> STARTING: {self.name} <==")
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        elapsed = time.time() - self.start
+        # THE FIX: If an exception occurred, print FAILED so it's obvious!
+        if exc_type is not None:
+            print(f"==> FAILED: {self.name} after {elapsed:.2f} seconds ({elapsed/60:.2f} minutes) <==\n")
+        else:
+            print(f"==> FINISHED: {self.name} in {elapsed:.2f} seconds ({elapsed/60:.2f} minutes) <==\n")
+        
 def parse_run_directory(path: Path) -> Tuple[Optional[str], Optional[str]]:
     """
     Extracts (formulation_name, domain_name) from a directory name.
@@ -54,5 +72,3 @@ def find_tailwater_feature(gdf_hydro: gpd.GeoDataFrame) -> str:
     
     # Return the list of tailwater feature_id(s)
     return tailwaters
-
-

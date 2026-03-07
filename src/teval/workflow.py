@@ -1,4 +1,3 @@
-
 from teval.obs import usgs
 import xarray as xr
 import pandas as pd
@@ -8,6 +7,10 @@ import matplotlib.pyplot as plt
 from typing import Dict, List
 import logging
 from zipfile import Path
+import multiprocessing
+from joblib import Parallel, delayed
+from dask.distributed import Lock
+import gc
 
 from teval.config import IOConfig, MetricsConfig, StatsConfig, VizConfig
 from teval.utils import find_tailwater_feature, parse_run_directory
@@ -15,77 +18,9 @@ from teval.metrics import deterministic as det
 from teval.metrics import significance as sig
 import teval.viz.static as tviz
 import teval.viz.animation as tanim
-import teval.viz.interactive as tinter
-
+from teval.utils import Timer
 
 logger = logging.getLogger(__name__)
-
-# Function for initializing domains based on directory structure and configuration options
-# def initialize_domains(io: IOConfig,
-#                        metrics: MetricsConfig,
-#                        viz: VizConfig) -> List[Domain]:
-#     """
-#     TODO: UPDATE DOCSTRING
-#     Scans an input directory, parses subfolder names, groups them by domain,
-#     and returns a list of prepared Domain objects.
-#     """ 
-#     # Unpack configuration options
-#     load_gpkgs = metrics.enabled or viz.static_maps.enabled or viz.interactive_map.enabled
-#     fetch_obs = metrics.enabled or viz.hydrographs.enabled
-    
-#     ensemble_file = None
-#     if io.ensemble_netcdf_dir:
-#         ensemble_file = glob.glob(str(io.ensemble_netcdf_dir / "*ensemble.nc"))
-    
-#     if io.troute_netcdf_dir:
-#         subdirs = [p for p in io.troute_netcdf_dir.iterdir() if p.is_dir() and p.name.endswith("_output")]
-#         domain_map = {}
-        
-#         for folder in subdirs:
-#             # Parse Folder Name
-#             formulation_name, domain_name = parse_run_directory(folder)
-            
-#             if not formulation_name or not domain_name:
-#                 continue
-            
-#             gpkg_path = None
-#             if load_gpkgs:
-#                 if domain_name=="CONUS":
-#                     def make_case_insensitive(s):
-#                         return "".join(f"[{c.lower()}{c.upper()}]" if c.isalpha() else c for c in s)
-
-#                     pattern = f"*{make_case_insensitive(domain_name)}*.gpkg"
-#                     gpkg_path = list(io.hydrofabric_dir.glob(pattern))
-#                 else:
-#                     gpkg_path = list(io.hydrofabric_dir.glob(f"*{domain_name}*.gpkg"))
-            
-#             gage_id = None
-#             if fetch_obs:
-#                 gage_id = domain_name
-#                 if io.observations_file and io.observations_file.exists():
-#                     obs_file_path = io.observations_file
-            
-#             # Set or Create Domain Key
-#             if domain_name not in domain_map:
-#                 domain_map[domain_name] = {
-#                     "formulations": {},
-#                     "hydrofabric": gpkg_path[0],
-#                     "gage_obs": {'domain_name': [gage_id], 'obs_file': [obs_file_path]} if gage_id else [],
-#                 }
-            
-#             # Find the NetCDF file inside
-#             nc_files = list(folder.glob("*.nc"))
-#             if not nc_files:
-#                 logger.warning(f"No NetCDF file found in {folder.name}")
-#                 continue
-            
-#             # Add Formulation to Domain
-#             domain_map[domain_name]["formulations"][formulation_name] = nc_files[0]
-    
-#     domain_map[domain_name]["ensemble"] = ensemble_file if ensemble_file else []
-    
-#     return domain_map
-
 
 def initialize_domains(io: IOConfig, metrics: MetricsConfig, viz: VizConfig) -> Dict:
     """
@@ -159,88 +94,6 @@ def _create_empty_domain_dict(domain_name: str, io: IOConfig, load_gpkgs: bool, 
     }
 
 # Functions for loading domain data based on the domain map created in initialize_domains
-# def load_domain_data(domain_dict: Dict[str, Dict]) -> List[Domain]:
-#     """
-#     Given a domain map with formulation paths, hydrofabric paths, and gage IDs, initializes Domain objects and loads their data.
-#     """
-#     function_map = {
-#         'formulations': _process_formulation_files,
-#         'hydrofabric': _process_hydrofabric,
-#         'gage_obs': _fetch_observations
-#         }
-    
-#     results = {}
-#     for key, value in domain_dict.items():
-#         if key in function_map:
-#             if key=='formulations':
-#                 results[key] = {'combined': [], 'ensemble_members': []}
-#                 results[key]['combined'], results[key]['ensemble_members'], t_min, t_max = function_map[key](value) # Return start and end time for fetching observations
-#             elif key=='gage_obs':
-#                 results[key] = function_map[key](value, t_min=t_min, t_max=t_max)
-#             else:
-#                 results[key], all_gage_ids = function_map[key](value)
-#                 domain_gage_str = domain_dict.get('gage_obs', {}).get('domain_name', [])
-#                 if not domain_gage_str=="CONUS":
-#                     domain_dict['gage_obs']['gage_list'] = list(set(domain_dict.get('gage_obs', {}).get('domain_name', []) + all_gage_ids)) # Update gage_obs list with any gage IDs found in hydrofabric
-#                 else:
-#                     domain_dict['gage_obs']['gage_list'] = all_gage_ids
-#         else:
-#             results[key] = f"No specific function for {key}" # Handle keys with no specific function
-            
-#     return results
-
-# def _process_formulation_files(files: Dict[str, Path]) -> xr.Dataset:
-#     """
-#     Loads multiple NetCDF files matching a pattern, extracts the formulation ID from attributes or filenames, and concatenates them into a single xarray Dataset.
-#     """
-#     datasets = []
-    
-#     for f in files.values():
-#         ds = xr.open_dataset(f, engine='netcdf4')
-#         datasets.append(ds)
-    
-#     combined_ds = xr.concat(
-#         datasets, 
-#         dim=pd.Index(files.keys(), name="formulation")
-#         )
-    
-    
-    
-#     ds_mean = combined_ds.mean(dim="formulation", keep_attrs=True)
-#     ds_median = combined_ds.median(dim="formulation", keep_attrs=True)
-    
-#     # Rename variables
-#     ds_mean = ds_mean.rename({v: f"{v}_mean" for v in ds_mean.data_vars})
-#     ds_median = ds_median.rename({v: f"{v}_median" for v in ds_median.data_vars})
-    
-#     # Merge
-#     ds_stats = xr.merge([ds_mean, ds_median])
-    
-#     # Calculate Max/Min/Quantiles
-#     num_members = len(files)
-#     if num_members < 10:
-#         # Fast path using optimized bottleneck C-code
-#         ds_lower = combined_ds.min(dim="formulation", keep_attrs=True)
-#         ds_upper = combined_ds.max(dim="formulation", keep_attrs=True)
-#     else:
-#         # Slow path for large ensembles
-#         ds_lower = combined_ds.quantile(0.05, dim="formulation", keep_attrs=True).drop_vars('quantile')
-#         ds_upper = combined_ds.quantile(0.95, dim="formulation", keep_attrs=True).drop_vars('quantile')
-    
-#     # Rename them to expected p05 and p95 so downstream plotting doesn't break
-#     ds_lower = ds_lower.rename({v: f"{v}_p05" for v in ds_lower.data_vars})
-#     ds_upper = ds_upper.rename({v: f"{v}_p95" for v in ds_upper.data_vars})
-    
-#     ds_stats = xr.merge([ds_stats, ds_lower, ds_upper])
-    
-#     ds_stats.attrs = combined_ds.attrs
-#     ds_stats.attrs['description'] = 'Ensemble Statistics'
-    
-#     t_min = pd.to_datetime(combined_ds.time.min().values)
-#     t_max = pd.to_datetime(combined_ds.time.max().values)
-    
-#     return ds_stats, combined_ds, t_min, t_max
-
 def load_domain_data(domain_dict: Dict, io: IOConfig) -> Dict:
     results = {}
     
@@ -280,31 +133,45 @@ def _process_formulation_files(formulation_dict: Dict) -> tuple:
     ds_stats = None
     combined_ds = None
     t_min, t_max = None, None
-    
-    # Load Pre-Computed Ensemble (if it exists)
+
+    # 1. Load Pre-Computed Ensemble (if it exists)
     if ensemble_file and ensemble_file.exists():
         logger.info(f"Loading pre-computed ensemble from {ensemble_file.name}")
-        ds_stats = xr.open_dataset(ensemble_file, engine="netcdf4")
+        # Use h5netcdf and chunk it directly
+        ds_stats = xr.open_dataset(ensemble_file, engine="h5netcdf", chunks={'feature_id': 'auto'})
         
-        # Get time bounds from the ensemble
         if 'time' in ds_stats.coords:
             t_min = pd.to_datetime(ds_stats.time.min().values)
             t_max = pd.to_datetime(ds_stats.time.max().values)
 
-    # Load Raw Formulation Files (if they exist)
+    # 2. Load Raw Formulation Files (if they exist)
     if raw_files:
-        logger.info(f"Loading {len(raw_files)} raw formulation files...")
-        datasets = [xr.open_dataset(f, engine="netcdf4") for f in raw_files.values()]
-        combined_ds = xr.concat(datasets, dim=pd.Index(raw_files.keys(), name="formulation"))
+        logger.info(f"Loading {len(raw_files)} raw formulation files with Dask mfdataset...")
         
-        # Get time bounds from raw files if we didn't get them from the ensemble
+        read_lock = Lock("hdf5-read-lock")
+        
+        # open_mfdataset with parallel=True and h5netcdf for thread safety
+        combined_ds = xr.open_mfdataset(
+            paths=list(raw_files.values()),
+            combine='nested',
+            concat_dim="formulation", 
+            engine="h5netcdf",
+            chunks={},       # Match small disk chunks for streaming
+            parallel=True,
+            lock=read_lock  
+        )
+        
+        # Assign coordinates properly
+        combined_ds = combined_ds.assign_coords(formulation=list(raw_files.keys()))
+
         if t_min is None:
             t_min = pd.to_datetime(combined_ds.time.min().values)
             t_max = pd.to_datetime(combined_ds.time.max().values)
 
-    # Calculate Stats ONLY if we don't have them yet
+    # 3. Calculate Stats Lazily
     if ds_stats is None and combined_ds is not None:
-        logger.info("Calculating ensemble statistics from raw files...")
+        logger.info("Setting up lazy ensemble statistics calculations...")
+        
         ds_mean = combined_ds.mean(dim="formulation", keep_attrs=True)
         ds_median = combined_ds.median(dim="formulation", keep_attrs=True)
         
@@ -312,7 +179,6 @@ def _process_formulation_files(formulation_dict: Dict) -> tuple:
         ds_median = ds_median.rename({v: f"{v}_median" for v in ds_median.data_vars})
         ds_stats = xr.merge([ds_mean, ds_median])
         
-        # Fast min/max for small ensembles instead of slow quantiles
         if len(raw_files) < 10:
             ds_lower = combined_ds.min(dim="formulation", keep_attrs=True)
             ds_upper = combined_ds.max(dim="formulation", keep_attrs=True)
@@ -327,11 +193,13 @@ def _process_formulation_files(formulation_dict: Dict) -> tuple:
         ds_stats.attrs = combined_ds.attrs
         ds_stats.attrs['description'] = 'Ensemble Statistics'
         
+        # NOTE: We purposefully DO NOT call ds_stats = ds_stats.compute() here!
+        # It remains completely lazy until it streams to the NetCDF file in __main__.py
+        
     elif ds_stats is None and combined_ds is None:
         raise ValueError("No ensemble file or raw formulation files found to process.")
         
     return ds_stats, combined_ds, t_min, t_max
-
 
 def _process_hydrofabric(gpkg_path: str) -> gpd.GeoDataFrame:
     """
@@ -356,34 +224,6 @@ def _process_hydrofabric(gpkg_path: str) -> gpd.GeoDataFrame:
         gdf = gdf.to_crs(epsg=4326)
     
     return gdf, gage_ids
-
-# def _fetch_observations(obs_dict: List, t_min: pd.Timestamp, t_max: pd.Timestamp) -> pd.DataFrame:
-#     """
-#     Fetches USGS observations for a given gage ID.
-#     """
-#     import pdb; pdb.set_trace()
-#     gage_id = obs_dict.get('gage_list', [None]) if obs_dict else None
-#     obs_file = obs_dict.get('obs_file', [None])[0] if obs_dict else None
-#     obs_df = pd.DataFrame()
-    
-#     if obs_file and obs_file.exists():
-#         obs_df = pd.read_parquet(obs_file) if obs_file.suffix==".parquet" else pd.read_csv(obs_file)
-#         obs_df.set_index('time', inplace=True)
-#     elif len(gage_id) > 0 and gage_id[0] is not None:
-#         obs_df = usgs.fetch_usgs_streamflow(
-#             gage_id,
-#             str(t_min.date()), 
-#             str(t_max.date()),
-#             to_cms=True,
-#             to_utc=True
-#             )
-    
-#         if not obs_df.empty:
-#             # Resample to hourly to match model output
-#             #TODO: Do we want to do resample the observations? Or resample the modeled data?
-#             obs_df = obs_df.resample("1h").mean().interpolate()
-        
-#     return obs_df
 
 def _fetch_observations(gage_ids: List, t_min: pd.Timestamp, t_max: pd.Timestamp, io: IOConfig) -> pd.DataFrame:
     """Loads observations from file (Parquet/CSV) if provided, else queries USGS API."""
@@ -509,6 +349,7 @@ def calculate_metrics(domain_data: Dict[str, Dict],
         # If calculating per formulation, convert the full ensemble to pandas too
         sim_df_members = None
         formulation_names = []
+        
         if metrics.per_formulation and ds_ensemble is not None:
             # Convert to DataFrame: MultiIndex (time, formulation) -> columns are feature_ids
             # Or just loop formulation dimension and make a dict of dataframes
@@ -554,8 +395,40 @@ def calculate_metrics(domain_data: Dict[str, Dict],
     
     return metric_results
 
+def _render_single_hydrograph(fid, ds_stats, obs_df, valid_gage_df, viz, stats, ds_ensemble, hydro_dir, metrics_df):
+    """Joblib worker function to render a single hydrograph safely with metrics."""
+    fig, ax = plt.subplots(figsize=(12, 6))
+    
+    series_obs = None
+    if valid_gage_df is not None and obs_df is not None:
+        if fid in valid_gage_df.index:
+            gage_id = valid_gage_df.loc[fid].get('gage')
+            if gage_id and str(gage_id) in obs_df.columns:
+                series_obs = obs_df[str(gage_id)]
+                
+    # Isolate metrics for just this specific Feature ID
+    fid_metrics = None
+    if metrics_df is not None and not metrics_df.empty:
+        fid_metrics = metrics_df[metrics_df['feature_id'] == fid]
+    
+    tviz.hydrograph(
+        ds_stats, 
+        feature_id=fid, 
+        ax=ax, 
+        obs_series=series_obs,
+        plot_uncertainty=viz.hydrographs.plot_uncertainty,
+        plot_members=viz.hydrographs.plot_members,
+        ensemble_ds=ds_ensemble,
+        quantiles=stats.quantiles,
+        metrics_df=fid_metrics
+    )
+    fig.savefig(hydro_dir / f"hydrograph_{fid}.png", bbox_inches='tight')
+    plt.close(fig)
+    gc.collect() 
+
+
 # Functions for producing visualizations based on the loaded domain data and calculated metrics
-def produce_domain_specific_visualizations(domain_data: Dict[str, Dict], viz: VizConfig, io: IOConfig, stats: StatsConfig):
+def produce_domain_specific_visualizations(domain_data: Dict, viz: VizConfig, io: IOConfig, stats: StatsConfig):
     """
     Given the loaded domain data and visualization config, produces and saves visualizations.
     """
@@ -564,14 +437,17 @@ def produce_domain_specific_visualizations(domain_data: Dict[str, Dict], viz: Vi
     gdf = domain_data.get('hydrofabric', gpd.GeoDataFrame())
     obs_df = domain_data.get('gage_obs', pd.DataFrame())
     
-    # Hydrographs
+    # Extract calculated metrics to pass to the plots
+    metrics_list = domain_data.get('metrics', [])
+    metrics_df = pd.DataFrame(metrics_list) if metrics_list else None
+    
+    # 1. Hydrographs
     if viz.hydrographs.enabled:
-        # TODO: Move this logic to earlier in __main__, create any output directories once if needed...
         hydro_dir = io.output_dir / "hydrographs"
         hydro_dir.mkdir(exist_ok=True)
         
         target_ids = viz.hydrographs.target_ids
-        # If user didn't specify target_ids, try to find gaged locations, then fall back to tailwaters
+        valid_gage_df = None
         if not target_ids:
             valid_gage_df = gdf[gdf['gage'].isin(obs_df.columns.values)]
             valid_gage_df = valid_gage_df.loc[~valid_gage_df.index.duplicated(keep='first')]
@@ -580,28 +456,24 @@ def produce_domain_specific_visualizations(domain_data: Dict[str, Dict], viz: Vi
             else:
                 target_ids = find_tailwater_feature(gdf.reset_index())
         
-        for fid in target_ids:
-            fig, ax = plt.subplots(figsize=(12, 6))
-            
-            series_obs = None
-            if valid_gage_df is not None and obs_df is not None:
-                if fid in valid_gage_df.index:
-                    gage_id = valid_gage_df.loc[fid].get('gage')
-                    if gage_id and str(gage_id) in obs_df.columns:
-                        series_obs = obs_df[str(gage_id)]
-            
-            tviz.hydrograph(
-                ds_stats, 
-                feature_id=fid, 
-                ax=ax, 
-                obs_series=series_obs,
-                plot_uncertainty=viz.hydrographs.plot_uncertainty,
-                plot_members=viz.hydrographs.plot_members,
-                ensemble_ds=ds_ensemble,
-                quantiles=stats.quantiles
+        valid_targets = np.intersect1d(target_ids, ds_stats.feature_id.values)
+        logger.info(f"Pre-loading data for {len(valid_targets)} hydrographs into RAM...")
+        
+        ds_stats_subset = ds_stats.sel(feature_id=valid_targets).compute()
+        
+        ds_ensemble_subset = None
+        if viz.hydrographs.plot_members and ds_ensemble is not None:
+            if 'feature_id' in ds_ensemble.dims:
+                ds_ensemble_subset = ds_ensemble.sel(feature_id=valid_targets).compute()
+
+        logger.info(f"Generating {len(valid_targets)} hydrographs in parallel...")
+        
+        with Timer("Plotting Hydrographs"):
+            n_cores = max(1, multiprocessing.cpu_count() - 1)
+            Parallel(n_jobs=n_cores)(
+                delayed(_render_single_hydrograph)(fid, ds_stats_subset, obs_df, valid_gage_df, viz, stats, ds_ensemble_subset, hydro_dir, metrics_df) 
+                for fid in valid_targets
             )
-            fig.savefig(hydro_dir / f"hydrograph_{fid}.png")
-            plt.close(fig)
     
     # Static Maps
     if viz.static_maps.enabled:
@@ -611,7 +483,8 @@ def produce_domain_specific_visualizations(domain_data: Dict[str, Dict], viz: Vi
             for var in viz.static_maps.variables:
                 fig, ax = plt.subplots(figsize=(10, 10))
                 tviz.map_network(gdf, ds_stats, var_name=var, ax=ax, add_basemap=viz.static_maps.basemap)
-                fig.savefig(map_dir / f"map_{fid}_{var}.png")
+                # THE FIX: Name the map using 'domain', not a leftover 'fid' from a previous loop
+                fig.savefig(map_dir / f"map_domain_{var}.png", bbox_inches='tight')
                 plt.close(fig)
     
     # Animation
@@ -666,14 +539,15 @@ def produce_domain_specific_visualizations(domain_data: Dict[str, Dict], viz: Vi
         domain_name = domain_data.get('gage_obs', {}).get('domain_name', ['domain'])[0]
         out_gif = anim_dir / f"streamflow_animation_{domain_name}.gif"
         
-        tanim.animate_network(
-            gdf=gdf_anim,
-            stats_ds=ds_anim_sliced,
-            output_path=str(out_gif),
-            var_name=viz.animation.variable,
-            fps=viz.animation.fps,
-            add_basemap=True
-        )
+        with Timer("Generating GIF Animation"):
+            tanim.animate_network(
+                gdf=gdf_anim,
+                stats_ds=ds_anim_sliced,
+                output_path=str(out_gif),
+                var_name=viz.animation.variable,
+                fps=viz.animation.fps,
+                add_basemap=True
+            )
 
 def plot_metrics_on_map(metrics_df: pd.DataFrame, variable: str, output_path: Path, title: str = None):
     """
@@ -691,4 +565,3 @@ def plot_metrics_on_map(metrics_df: pd.DataFrame, variable: str, output_path: Pa
         output_path=output_path,
         title=title
     )
-    

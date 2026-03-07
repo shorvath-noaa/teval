@@ -1,13 +1,17 @@
 import argparse
 import sys
+import time
 import logging
 import pandas as pd
+import xarray as xr
 from teval.config import TevalConfig, generate_default_config, generate_config_help
-from teval.config import TevalConfig
 from teval import workflow
-from teval.viz.points import plot_domain_metrics
-# from teval.framework.evaluator import Evaluator
+from teval.utils import Timer
+import os
+import multiprocessing
+from dask.distributed import Client
 
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 def main():
@@ -43,34 +47,60 @@ def main():
     # Load and Validate Configuration
     config = TevalConfig.from_yaml(args.config)
     
+    # DASK INITIALIZATION (Thread-safe with h5netcdf)
+    os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
+
+    slurm_cores = os.environ.get("SLURM_CPUS_PER_TASK")
+    num_cores = int(slurm_cores) if slurm_cores else max(1, multiprocessing.cpu_count() - 1)
+    
+    client = Client(processes=False, n_workers=1, threads_per_worker=num_cores)
+    
+    logger.info(f"Initialized Dask Client with 1 worker and {num_cores} threads.")
+    logger.info(f"Dask Dashboard: {client.dashboard_link}")
+    
+
     # Create domain mapping containing individual formulations, gpkg paths, USGS gage information, etc.
     logger.info("Starting Domain Initialization...")
     domain_map = workflow.initialize_domains(config.io, config.metrics, config.viz)
     
-    
-    # TODO: Add parallel option
     logger.info("Starting Domain Processing...")
     domain_data = {}
     metrics_list = []
     
     for key, value in domain_map.items():
-        # Read files ngen files, hydrofabric, and observations for each domain (if applicable)
-        domain_data[key] = workflow.load_domain_data(value, config.io)
-        # Only save the ensemble NetCDF if we generated it from scratch this run
-        if value['formulations'].get('ensemble_file') is None:
-            out_nc = config.io.output_dir / f"{key}_ensemble.nc"
-            logger.info(f"Saving newly computed ensemble to {out_nc}...")
-            domain_data[key]['formulations']['combined'].to_netcdf(out_nc)
-        else:
-            logger.info(f"Skipping ensemble save; using pre-computed file: {value['formulations']['ensemble_file']}")
+        with Timer(f"1. Loading Raw Data ({key})"):
+            # Read files ngen files, hydrofabric, and observations for each domain (if applicable)
+            domain_data[key] = workflow.load_domain_data(value, config.io)
         
-        # Calculate Metrics
-        domain_data[key]['metrics'] = workflow.calculate_metrics(domain_data[key], config.metrics)
-        metrics_list.append(pd.DataFrame(domain_data[key]['metrics']))
+        with Timer(f"2. Streaming NetCDF to Disk ({key})"):
+            if value['formulations'].get('ensemble_file') is None:
+                out_nc = config.io.output_dir / f"{key}_ensemble.nc"
+                logger.info(f"Streaming computed ensemble directly to {out_nc}...")
+                
+                ds_to_save = domain_data[key]['formulations']['combined'].astype('float32')
+                
+                # Stream directly to disk using the thread-safe engine and compression
+                ds_to_save.to_netcdf(out_nc, engine="h5netcdf")
+                # ---------------------------------------------------------
+                
+                # Reload the finished file and enforce contiguous time chunking
+                domain_data[key]['formulations']['combined'] = xr.open_dataset(
+                    out_nc, engine="h5netcdf", chunks={'time': -1, 'feature_id': 'auto'}
+                )
+            else:
+                logger.info(f"Skipping ensemble save; using pre-computed file: {value['formulations']['ensemble_file']}")
+                domain_data[key]['formulations']['combined'] = domain_data[key]['formulations']['combined'].chunk(
+                    {'time': -1, 'feature_id': 'auto'}
+                )
         
-        # Create visualizations
-        # TODO: Add domain specific visualizations to reading files loop
-        workflow.produce_domain_specific_visualizations(domain_data[key], config.viz, config.io, config.stats)
+        with Timer(f"3. Calculating Metrics ({key})"):
+            # Calculate Metrics
+            domain_data[key]['metrics'] = workflow.calculate_metrics(domain_data[key], config.metrics)
+            metrics_list.append(pd.DataFrame(domain_data[key]['metrics']))
+        
+        with Timer(f"4. Generating Visualizations ({key})"):
+            # Create visualizations
+            workflow.produce_domain_specific_visualizations(domain_data[key], config.viz, config.io, config.stats)
         
         
     metrics_df = pd.concat(metrics_list)
@@ -83,14 +113,10 @@ def main():
     if config.viz.metrics_maps.enabled:
         sources = metrics_df['source'].unique()
         
-        # Loop through each metric defined in the config (e.g. nse, kge, pbias)
         for metric in config.viz.metrics_maps.variables:
-            
-            # Loop through each formulation (e.g. 'ensemble_mean', 'noahowp_topmodel')
             for src in sources:
                 src_df = metrics_df[metrics_df['source'] == src]
                 
-                # Check if this specific metric was actually calculated
                 if metric in src_df.columns:
                     workflow.plot_metrics_on_map(
                         metrics_df=src_df,
@@ -101,7 +127,7 @@ def main():
                 else:
                     logger.warning(f"Metric '{metric}' not found in dataframe for source '{src}'. Skipping map.")
 
-    # Interactive Map (Groups all sources together)
+    # Interactive Map
     if config.viz.interactive_map.enabled:
         from teval.viz.interactive import plot_interactive_metrics_map
         map_out = config.io.output_dir / "interactive_metrics_map.html"
