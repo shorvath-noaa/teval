@@ -72,45 +72,22 @@ def main():
             # Read files ngen files, hydrofabric, and observations for each domain (if applicable)
             domain_data[key] = workflow.load_domain_data(value, config.io)
         
-        with Timer(f"2. Streaming NetCDF to Disk ({key})"):
+        with Timer(f"2. Computing Ensemble into RAM ({key})"):
             if value['formulations'].get('ensemble_file') is None:
-                # Create a directory to hold the sharded NetCDF files
-                out_dir = config.io.output_dir / f"{key}_ensemble_parts"
-                out_dir.mkdir(exist_ok=True)
-                logger.info(f"Streaming sharded computed ensemble directly to {out_dir}...")
+                logger.info("Skipping disk write! Computing ensemble statistics directly into RAM...")
                 
+                # Cast to float32 to keep RAM footprint tiny
                 ds_to_save = domain_data[key]['formulations']['combined'].astype('float32')
                 
-                # Split the dataset into chunks of 500 feature_ids
-                fids = ds_to_save.feature_id.values
-                chunk_size = 500
+                # FORCE the 192 cores to do the math NOW and store it in RAM
+                domain_data[key]['formulations']['combined'] = ds_to_save.compute()
                 
-                datasets = []
-                paths = []
-                
-                for i in range(0, len(fids), chunk_size):
-                    subset_fids = fids[i:i + chunk_size]
-                    ds_sub = ds_to_save.sel(feature_id=subset_fids)
-                    datasets.append(ds_sub)
-                    paths.append(str(out_dir / f"ensemble_part_{i}.nc"))
-                
-                # Write all files in parallel
-                xr.save_mfdataset(datasets, paths, engine="h5netcdf")
-                
-                # Reload the parts as a single cohesive dataset
-                domain_data[key]['formulations']['combined'] = xr.open_mfdataset(
-                    paths, 
-                    engine="h5netcdf", 
-                    combine='nested', 
-                    concat_dim='feature_id', 
-                    parallel=True,
-                    chunks={'time': -1, 'feature_id': 'auto'}
-                )
+                logger.info("Ensemble statistics successfully loaded into RAM.")
             else:
                 logger.info(f"Skipping ensemble save; using pre-computed file: {value['formulations']['ensemble_file']}")
-                # If they pass a directory of sharded files or a single file, handle it safely
-                ds = domain_data[key]['formulations']['combined']
-                domain_data[key]['formulations']['combined'] = ds.chunk({'time': -1, 'feature_id': 'auto'})
+                domain_data[key]['formulations']['combined'] = domain_data[key]['formulations']['combined'].chunk(
+                    {'time': -1, 'feature_id': 'auto'}
+                )
         
         with Timer(f"3. Calculating Metrics ({key})"):
             # Calculate Metrics
