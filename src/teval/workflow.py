@@ -134,17 +134,26 @@ def _process_formulation_files(formulation_dict: Dict) -> tuple:
     combined_ds = None
     t_min, t_max = None, None
 
-    # 1. Load Pre-Computed Ensemble (if it exists)
+    # Load Pre-Computed Ensemble (if it exists)
     if ensemble_file and ensemble_file.exists():
-        logger.info(f"Loading pre-computed ensemble from {ensemble_file.name}")
-        # Use h5netcdf and chunk it directly
-        ds_stats = xr.open_dataset(ensemble_file, engine="h5netcdf", chunks={'feature_id': 'auto'})
+        logger.info(f"Loading pre-computed ensemble stats from {ensemble_file.name}")
         
-        if 'time' in ds_stats.coords:
-            t_min = pd.to_datetime(ds_stats.time.min().values)
-            t_max = pd.to_datetime(ds_stats.time.max().values)
+        if ensemble_file.suffix == '.zarr':
+            ds_stats = xr.open_zarr(ensemble_file, chunks={'feature_id': 'auto'})
+        elif ensemble_file.is_dir():
+            # Load the sharded NetCDF directory
+            ds_stats = xr.open_mfdataset(
+                f"{ensemble_file}/*.nc", 
+                engine="h5netcdf", 
+                combine='nested', 
+                concat_dim='feature_id',
+                parallel=True,
+                chunks={'feature_id': 'auto'}
+            )
+        else:
+            ds_stats = xr.open_dataset(ensemble_file, engine="h5netcdf", chunks={'feature_id': 'auto'}, mode='r')
 
-    # 2. Load Raw Formulation Files (if they exist)
+    # Load Raw Formulation Files (if they exist)
     if raw_files:
         logger.info(f"Loading {len(raw_files)} raw formulation files with Dask mfdataset...")
         
@@ -168,7 +177,7 @@ def _process_formulation_files(formulation_dict: Dict) -> tuple:
             t_min = pd.to_datetime(combined_ds.time.min().values)
             t_max = pd.to_datetime(combined_ds.time.max().values)
 
-    # 3. Calculate Stats Lazily
+    # Calculate Stats Lazily
     if ds_stats is None and combined_ds is not None:
         logger.info("Setting up lazy ensemble statistics calculations...")
         

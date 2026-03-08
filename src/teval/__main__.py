@@ -47,18 +47,18 @@ def main():
     # Load and Validate Configuration
     config = TevalConfig.from_yaml(args.config)
     
-    # DASK INITIALIZATION (Thread-safe with h5netcdf)
+    # Dask Initilaization
     os.environ["HDF5_USE_FILE_LOCKING"] = "FALSE"
 
     slurm_cores = os.environ.get("SLURM_CPUS_PER_TASK")
     num_cores = int(slurm_cores) if slurm_cores else max(1, multiprocessing.cpu_count() - 1)
     
-    client = Client(processes=False, n_workers=1, threads_per_worker=8)
+    n_workers = max(1, num_cores // 4)
+    client = Client(processes=True, n_workers=n_workers, threads_per_worker=4)
     
-    logger.info(f"Initialized Dask Client with 1 worker and {num_cores} threads.")
+    logger.info(f"Initialized Dask Client with {n_workers} workers and 4 threads each.")
     # logger.info(f"Dask Dashboard: {client.dashboard_link}")
     
-
     # Create domain mapping containing individual formulations, gpkg paths, USGS gage information, etc.
     logger.info("Starting Domain Initialization...")
     domain_map = workflow.initialize_domains(config.io, config.metrics, config.viz)
@@ -74,30 +74,43 @@ def main():
         
         with Timer(f"2. Streaming NetCDF to Disk ({key})"):
             if value['formulations'].get('ensemble_file') is None:
-                out_nc = config.io.output_dir / f"{key}_ensemble.nc"
-                logger.info(f"Streaming computed ensemble directly to {out_nc}...")
+                # Create a directory to hold the sharded NetCDF files
+                out_dir = config.io.output_dir / f"{key}_ensemble_parts"
+                out_dir.mkdir(exist_ok=True)
+                logger.info(f"Streaming sharded computed ensemble directly to {out_dir}...")
                 
                 ds_to_save = domain_data[key]['formulations']['combined'].astype('float32')
                 
-                time_chunk = min(len(ds_to_save.time), 24 * 30) 
-                fid_chunk = min(len(ds_to_save.feature_id), 1000)
+                # Split the dataset into chunks of 500 feature_ids
+                fids = ds_to_save.feature_id.values
+                chunk_size = 500
                 
-                encoding = {}
-                for var in ds_to_save.data_vars:
-                    if 'time' in ds_to_save[var].dims and 'feature_id' in ds_to_save[var].dims:
-                        encoding[var] = {'chunksizes': (time_chunk, fid_chunk)}
+                datasets = []
+                paths = []
                 
-                ds_to_save.to_netcdf(out_nc, engine="h5netcdf", encoding=encoding)
+                for i in range(0, len(fids), chunk_size):
+                    subset_fids = fids[i:i + chunk_size]
+                    ds_sub = ds_to_save.sel(feature_id=subset_fids)
+                    datasets.append(ds_sub)
+                    paths.append(str(out_dir / f"ensemble_part_{i}.nc"))
                 
-                # Reload the finished file and enforce contiguous time chunking
-                domain_data[key]['formulations']['combined'] = xr.open_dataset(
-                    out_nc, engine="h5netcdf", chunks={'time': -1, 'feature_id': 'auto'}
+                # Write all files in parallel
+                xr.save_mfdataset(datasets, paths, engine="h5netcdf")
+                
+                # Reload the parts as a single cohesive dataset
+                domain_data[key]['formulations']['combined'] = xr.open_mfdataset(
+                    paths, 
+                    engine="h5netcdf", 
+                    combine='nested', 
+                    concat_dim='feature_id', 
+                    parallel=True,
+                    chunks={'time': -1, 'feature_id': 'auto'}
                 )
             else:
                 logger.info(f"Skipping ensemble save; using pre-computed file: {value['formulations']['ensemble_file']}")
-                domain_data[key]['formulations']['combined'] = domain_data[key]['formulations']['combined'].chunk(
-                    {'time': -1, 'feature_id': 'auto'}
-                )
+                # If they pass a directory of sharded files or a single file, handle it safely
+                ds = domain_data[key]['formulations']['combined']
+                domain_data[key]['formulations']['combined'] = ds.chunk({'time': -1, 'feature_id': 'auto'})
         
         with Timer(f"3. Calculating Metrics ({key})"):
             # Calculate Metrics
