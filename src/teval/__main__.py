@@ -9,7 +9,7 @@ from teval import workflow
 from teval.utils import Timer
 import os
 import multiprocessing
-from dask.distributed import Client
+from dask.distributed import Client, wait
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -74,15 +74,19 @@ def main():
         
         with Timer(f"2. Computing Ensemble into RAM ({key})"):
             if value['formulations'].get('ensemble_file') is None:
-                logger.info("Skipping disk write! Computing ensemble statistics directly into RAM...")
+                logger.info("Skipping disk write! Computing ensemble statistics directly into distributed RAM...")
                 
                 # Cast to float32 to keep RAM footprint tiny
                 ds_to_save = domain_data[key]['formulations']['combined'].astype('float32')
                 
-                # FORCE the 192 cores to do the math NOW and store it in RAM
-                domain_data[key]['formulations']['combined'] = ds_to_save.compute()
+                # trigger the math but leave data distributed across the 48 workers
+                ds_persisted = ds_to_save.persist()
                 
-                logger.info("Ensemble statistics successfully loaded into RAM.")
+                # Force the main script to wait until all 192 cores finish the math
+                wait(ds_persisted)
+                
+                domain_data[key]['formulations']['combined'] = ds_persisted
+                logger.info("Ensemble statistics successfully locked into cluster RAM.")
             else:
                 logger.info(f"Skipping ensemble save; using pre-computed file: {value['formulations']['ensemble_file']}")
                 domain_data[key]['formulations']['combined'] = domain_data[key]['formulations']['combined'].chunk(
