@@ -31,7 +31,7 @@ def initialize_domains(io: IOConfig, metrics: MetricsConfig, viz: VizConfig) -> 
     
     domain_map = {}
     
-    # 1. First, discover raw T-Route outputs if provided
+    # Discover raw T-Route outputs if provided
     if io.troute_netcdf_dir:
         subdirs = [p for p in io.troute_netcdf_dir.iterdir() if p.is_dir() and p.name.endswith("_output")]
         for folder in subdirs:
@@ -48,14 +48,13 @@ def initialize_domains(io: IOConfig, metrics: MetricsConfig, viz: VizConfig) -> 
             if nc_files:
                 domain_map[domain_name]["formulations"]["raw_files"][formulation_name] = nc_files[0]
 
-    # 2. Second, discover pre-computed Ensembles if provided
+    # Discover pre-computed Ensembles if provided
     if io.ensemble_netcdf_dir:
-        # Look for files like CONUS_ensemble.nc or just ensemble.nc inside a domain folder
+        # Look for netcdf files inside a domain folder
         ensemble_files = list(io.ensemble_netcdf_dir.rglob("*.nc"))
         
         for e_file in ensemble_files:
-            # Heuristic: Try to extract domain name from filename (e.g., "CONUS_ensemble.nc")
-            # If your naming convention is different, adjust this extraction.
+            # Extract domain name from filename (e.g., "CONUS_ensemble.nc")
             domain_name = e_file.stem.split("_ensemble")[0] if "_ensemble" in e_file.stem else e_file.stem
             
             if domain_name not in domain_map:
@@ -105,16 +104,10 @@ def load_domain_data(domain_dict: Dict, io: IOConfig) -> Dict:
     results['formulations']['ensemble_members'] = ds_members
     
     # Process Hydrofabric
-    results['hydrofabric'], all_gage_ids = _process_hydrofabric(domain_dict['hydrofabric'])
+    results['hydrofabric'], all_gage_ids, results['gage_to_fids'], results['gage_to_nexus'] = _process_hydrofabric(domain_dict['hydrofabric'])
     
-    # Clean up the gage list (handling the CONUS logic)
     initial_gages = domain_dict.get('gage_obs', {}).get('domain_name', [])
-    
-    # Prevent the domain name itself from being queried as a USGS Gage
-    if "CONUS" in initial_gages:
-        initial_gages.remove("CONUS")
-        
-    # Combine any explicitly passed gages with the gages extracted from the hydrofabric
+    if "CONUS" in initial_gages: initial_gages.remove("CONUS")
     gage_ids = list(set(initial_gages + all_gage_ids))
     
     # Fetch/Load Observations
@@ -134,29 +127,28 @@ def _process_formulation_files(formulation_dict: Dict) -> tuple:
     combined_ds = None
     t_min, t_max = None, None
 
-    # 1. Load Pre-Computed Ensemble (if it exists)
+    # Load Pre-Computed Ensemble (if it exists)
     if ensemble_file and ensemble_file.exists():
         logger.info(f"Loading pre-computed ensemble from {ensemble_file.name}")
-        # Use h5netcdf and chunk it directly
+        
         ds_stats = xr.open_dataset(ensemble_file, engine="h5netcdf", chunks={'feature_id': 'auto'})
         
         if 'time' in ds_stats.coords:
             t_min = pd.to_datetime(ds_stats.time.min().values)
             t_max = pd.to_datetime(ds_stats.time.max().values)
 
-    # 2. Load Raw Formulation Files (if they exist)
+    # Load Raw Formulation Files (if they exist)
     if raw_files:
         logger.info(f"Loading {len(raw_files)} raw formulation files with Dask mfdataset...")
         
         read_lock = Lock("hdf5-read-lock")
         
-        # open_mfdataset with parallel=True and h5netcdf for thread safety
         combined_ds = xr.open_mfdataset(
             paths=list(raw_files.values()),
             combine='nested',
             concat_dim="formulation", 
             engine="h5netcdf",
-            chunks={},       # Match small disk chunks for streaming
+            chunks={},
             parallel=True,
             lock=read_lock  
         )
@@ -168,7 +160,7 @@ def _process_formulation_files(formulation_dict: Dict) -> tuple:
             t_min = pd.to_datetime(combined_ds.time.min().values)
             t_max = pd.to_datetime(combined_ds.time.max().values)
 
-    # 3. Calculate Stats Lazily
+    # Calculate Stats Lazily
     if ds_stats is None and combined_ds is not None:
         logger.info("Setting up lazy ensemble statistics calculations...")
         
@@ -193,37 +185,58 @@ def _process_formulation_files(formulation_dict: Dict) -> tuple:
         ds_stats.attrs = combined_ds.attrs
         ds_stats.attrs['description'] = 'Ensemble Statistics'
         
-        # NOTE: We purposefully DO NOT call ds_stats = ds_stats.compute() here!
-        # It remains completely lazy until it streams to the NetCDF file in __main__.py
-        
     elif ds_stats is None and combined_ds is None:
         raise ValueError("No ensemble file or raw formulation files found to process.")
         
     return ds_stats, combined_ds, t_min, t_max
 
-def _process_hydrofabric(gpkg_path: str) -> gpd.GeoDataFrame:
+def _process_hydrofabric(gpkg_path: str) -> tuple:
     """
-    Loads the hydrofabric GeoDataFrame and prepares the index for joining with model output.
+    Loads the hydrofabric GeoDataFrame, prepares the index, 
+    and builds a comprehensive gage-to-feature_id crosswalk from the network table.
+    Assigns spatial gage locations based on highest stream order.
     """
     gdf = gpd.GeoDataFrame()
+    gage_ids = []
+    gage_to_fids = {}
+    gage_to_nexus = {}
+
     if gpkg_path:
-        gdf = pd.merge(
-            gpd.read_file(gpkg_path, layer='flowpaths')[['id','toid','hydroseq','order','geometry']],
-            gpd.read_file(gpkg_path, layer='flowpath-attributes')[['id','gage']]
-            )
+        # Read Flowpaths for geometry
+        flowpaths = gpd.read_file(gpkg_path, layer='flowpaths')[['id','toid','hydroseq','order','geometry']]
+        flowpaths['id'] = flowpaths['id'].str.replace(r'\D+', '', regex=True).astype(int)
+        flowpaths['toid'] = flowpaths['toid'].str.replace(r'\D+', '', regex=True).astype(int)
+        flowpaths.set_index('id', inplace=True)
+
+        # Read Network for the complete gage crosswalk
+        network = gpd.read_file(gpkg_path, layer='network')
+        gages_net = network[network['hl_uri'].str.startswith('gages-', na=False)].copy()
         
-        gdf['id'] = gdf['id'].str.replace(r'\D+', '', regex=True).astype(int)
-        gdf['toid'] = gdf['toid'].str.replace(r'\D+', '', regex=True).astype(int)
+        if not gages_net.empty:
+            gages_net['gage'] = gages_net['hl_uri'].str.replace('gages-', '')
+            
+            # Extract the nexus ID (the 'toid' of these rows) for each gage
+            gage_to_nexus = gages_net.groupby('gage')['toid'].first().to_dict()
+
+            gages_net['id'] = gages_net['id'].str.replace(r'\D+', '', regex=True).astype(int)
+
+            # Group by gage to get a list of all incoming feature IDs
+            gage_to_fids = gages_net.groupby('gage')['id'].unique().apply(list).to_dict()
+            gage_ids = list(gage_to_fids.keys())
+
+            # Assign the gage to the flowpath with the highest stream order for mapping
+            flowpath_gage_df = pd.merge(flowpaths['order'].reset_index(),gages_net[['id','gage']],on='id').drop_duplicates()
+            flowpath_gage_df = flowpath_gage_df.loc[flowpath_gage_df.groupby('gage')['order'].idxmax()][['gage','id']]
+            flowpath_gage_df = flowpath_gage_df.set_index('id')
+            flowpath_gage_dict = flowpath_gage_df.to_dict().get('gage')
+            
+            flowpaths['gage'] = pd.Series(flowpath_gage_dict)
+        else:
+            flowpaths['gage'] = None
         
-        gdf.set_index('id', inplace=True)
-        
-        # Return list of gageIDs in the domain
-        gage_ids = gdf['gage'].dropna().unique().tolist()
-        
-        # Re-project the gdf to lat/lon:
-        gdf = gdf.to_crs(epsg=4326)
-    
-    return gdf, gage_ids
+        gdf = flowpaths.to_crs(epsg=4326)
+
+    return gdf, gage_ids, gage_to_fids, gage_to_nexus
 
 def _fetch_observations(gage_ids: List, t_min: pd.Timestamp, t_max: pd.Timestamp, io: IOConfig) -> pd.DataFrame:
     """Loads observations from file (Parquet/CSV) if provided, else queries USGS API."""
@@ -232,7 +245,7 @@ def _fetch_observations(gage_ids: List, t_min: pd.Timestamp, t_max: pd.Timestamp
     if not gage_ids:
         return obs_df
         
-    # 1. Load from file (if provided)
+    # Load from file (if provided)
     if io.observations_file and io.observations_file.exists():
         file_path = io.observations_file
         logger.info(f"Loading observations from {file_path.suffix} file: {file_path}")
@@ -254,11 +267,10 @@ def _fetch_observations(gage_ids: List, t_min: pd.Timestamp, t_max: pd.Timestamp
         obs_df.index = pd.to_datetime(obs_df.index)
         
         # Filter dataframe to only contain the requested gages
-        # Convert all columns and requested gages to string to ensure safe matching
         valid_gages = list(set(str(g) for g in obs_df.columns) & set(str(g) for g in gage_ids))
         obs_df = obs_df[valid_gages]
         
-    # 2. Fallback to API download
+    # Fallback to API download
     elif io.auto_download_usgs:
         # Filter out any lingering non-numeric strings just in case
         clean_gages = [str(g) for g in gage_ids if str(g).isdigit()]
@@ -273,7 +285,6 @@ def _fetch_observations(gage_ids: List, t_min: pd.Timestamp, t_max: pd.Timestamp
                 to_utc=True
             )
             
-            # ONLY resample if fetched from API, matching old code logic
             if not obs_df.empty:
                 obs_df = obs_df.resample("1h").mean().interpolate()
                 
@@ -321,6 +332,7 @@ def calculate_metrics(domain_data: Dict[str, Dict],
                       ) -> Dict[str, Dict]:
     """
     Given the loaded domain data, calculates specified metrics and returns results in a structured format.
+    Dynamically sums streamflow for gages that receive flow from multiple feature_ids.
     """
     metric_results = []
     
@@ -328,49 +340,67 @@ def calculate_metrics(domain_data: Dict[str, Dict],
     gdf = domain_data.get('hydrofabric', gpd.GeoDataFrame())
     ds_stats = domain_data.get('formulations', {}).get('combined', xr.Dataset())
     ds_ensemble = domain_data.get('formulations', {}).get('ensemble_members', xr.Dataset())
+    gage_to_fids = domain_data.get('gage_to_fids', {})
     
-    if not obs_df.empty and not gdf.empty and len(ds_stats.dims) > 0:
-        # Map FeatureID -> GageID if possible
-        fid_to_gage = {}
-        if  'gage' in gdf.columns:
-            # Create mapping from index (feature_id) to gage column
-            valid_gage_df = gdf[~gdf['gage'].isnull()]
-            if not valid_gage_df.empty:
-                fid_to_gage = dict(zip(valid_gage_df.index, valid_gage_df['gage']))
-                valid_fids = [f for f, g in fid_to_gage.items() if str(g) in obs_df.columns]
-                valid_gage_df = valid_gage_df.loc[valid_fids]
-                valid_gage_df = valid_gage_df.loc[~valid_gage_df.index.duplicated(keep='first')]
-            else:
-                logger.warning("No valid gage entries found in hydrofabric for mapping.")
+    if not obs_df.empty and not gdf.empty and len(ds_stats.dims) > 0 and gage_to_fids:
         
-        logger.info("Converting Xarray slice to Pandas for fast metric calculation...")
-        sim_df_mean = ds_stats[sim_var].sel(feature_id=valid_fids).to_pandas()
+        # Filter to gages we actually have observations for
+        valid_gages = [str(g) for g in gage_to_fids.keys() if str(g) in obs_df.columns]
         
-        # If calculating per formulation, convert the full ensemble to pandas too
+        # Flatten all required fids to pull from xarray at once
+        all_req_fids = []
+        for g in valid_gages:
+            all_req_fids.extend(gage_to_fids[g])
+        all_req_fids = list(set(all_req_fids)) 
+        valid_fids_in_ds = [f for f in all_req_fids if f in ds_stats.feature_id.values]
+        
+        logger.info("Converting Xarray slice to Pandas and summing multi-flowpath gages...")
+        sim_df_mean_raw = ds_stats[sim_var].sel(feature_id=valid_fids_in_ds).to_pandas()
+        
+        # Build a dictionary first, then convert to DataFrame all at once
+        mean_dict = {}
+        for g in valid_gages:
+            g_fids = [f for f in gage_to_fids[g] if f in valid_fids_in_ds]
+            if g_fids:
+                mean_dict[g] = sim_df_mean_raw[g_fids].sum(axis=1)
+        sim_df_mean = pd.DataFrame(mean_dict)
+        
+        # If calculating per formulation, do the exact same dictionary aggregation
         sim_df_members = None
         formulation_names = []
         
         if metrics.per_formulation and ds_ensemble is not None:
-            # Convert to DataFrame: MultiIndex (time, formulation) -> columns are feature_ids
-            # Or just loop formulation dimension and make a dict of dataframes
             formulation_names = ds_ensemble.formulation.values
             sim_df_members = {}
             for form in formulation_names:
-                sim_df_members[form] = ds_ensemble['streamflow'].sel(formulation=form, feature_id=valid_fids).to_pandas()
+                raw_members = ds_ensemble['streamflow'].sel(formulation=form, feature_id=valid_fids_in_ds).to_pandas()
+                
+                # Build a dictionary for this formulation
+                form_dict = {}
+                for g in valid_gages:
+                    g_fids = [f for f in gage_to_fids[g] if f in valid_fids_in_ds]
+                    if g_fids:
+                        form_dict[g] = raw_members[g_fids].sum(axis=1)
+                        
+                sim_df_members[form] = pd.DataFrame(form_dict)
         
-        for fid in valid_fids:
-            gage_id_str = str(fid_to_gage[fid])
+        # Calculate final metrics
+        for gage_id_str in valid_gages:
+            if gage_id_str not in sim_df_mean.columns: continue
+            
             obs_series = obs_df[gage_id_str].tz_localize(None) if obs_df[gage_id_str].index.tz else obs_df[gage_id_str]
             
-            geom = valid_gage_df.loc[fid].geometry.centroid if fid in valid_gage_df.index else None
+            # Use the primary fid for assigning spatial metadata (lat/lon)
+            primary_fid = gage_to_fids[gage_id_str][0]
+            geom = gdf.loc[primary_fid].geometry.centroid if primary_fid in gdf.index else None
             lat, lon = (geom.y, geom.x) if geom else (None, None)
 
             # Calculate Ensemble Mean
             row_mean = _calc_row(
-                sim_series=sim_df_mean[fid], 
+                sim_series=sim_df_mean[gage_id_str], 
                 obs_series=obs_series, 
                 source_name="ensemble_mean", 
-                fid=fid, 
+                fid=primary_fid, 
                 gage_id_str=gage_id_str, 
                 lat=lat, 
                 lon=lon, 
@@ -382,10 +412,10 @@ def calculate_metrics(domain_data: Dict[str, Dict],
             if metrics.per_formulation and sim_df_members:
                 for form in formulation_names:
                     row_form = _calc_row(
-                        sim_series=sim_df_members[form][fid], 
+                        sim_series=sim_df_members[form][gage_id_str], 
                         obs_series=obs_series, 
                         source_name=form, 
-                        fid=fid, 
+                        fid=primary_fid, 
                         gage_id_str=gage_id_str, 
                         lat=lat, 
                         lon=lon, 
@@ -395,36 +425,44 @@ def calculate_metrics(domain_data: Dict[str, Dict],
     
     return metric_results
 
-def _render_single_hydrograph(fid, ds_stats, obs_df, valid_gage_df, viz, stats, ds_ensemble, hydro_dir, metrics_df):
-    """Joblib worker function to render a single hydrograph safely with metrics."""
+def _render_single_hydrograph(gage, fids, nexus_id, ds_stats, obs_df, viz, stats, ds_ensemble, hydro_dir, metrics_df):
+    """Joblib worker function to render a single hydrograph securely."""
+    valid_fids = [f for f in fids if f in ds_stats.feature_id.values]
+    if not valid_fids: return
+    
+    # Aggregate the flow across all incoming feature_ids
+    ds_stats_summed = ds_stats.sel(feature_id=valid_fids).sum(dim='feature_id', keep_attrs=True)
+    
+    ds_ensemble_summed = None
+    if viz.hydrographs.plot_members and ds_ensemble is not None:
+        ds_ensemble_summed = ds_ensemble.sel(feature_id=valid_fids).sum(dim='feature_id', keep_attrs=True)
+        
     fig, ax = plt.subplots(figsize=(12, 6))
     
     series_obs = None
-    if valid_gage_df is not None and obs_df is not None:
-        if fid in valid_gage_df.index:
-            gage_id = valid_gage_df.loc[fid].get('gage')
-            if gage_id and str(gage_id) in obs_df.columns:
-                series_obs = obs_df[str(gage_id)]
-                
-    # Isolate metrics for just this specific Feature ID
+    if obs_df is not None and gage in obs_df.columns:
+        series_obs = obs_df[gage]
+        
+    # Isolate metrics for just this specific Gage ID
     fid_metrics = None
     if metrics_df is not None and not metrics_df.empty:
-        fid_metrics = metrics_df[metrics_df['feature_id'] == fid]
+        fid_metrics = metrics_df[metrics_df['gage_id'] == str(gage)]
     
     tviz.hydrograph(
-        ds_stats, 
-        feature_id=fid, 
+        stats_ds=ds_stats_summed, 
+        gage_id=gage,
+        nexus_id=nexus_id,
         ax=ax, 
         obs_series=series_obs,
         plot_uncertainty=viz.hydrographs.plot_uncertainty,
         plot_members=viz.hydrographs.plot_members,
-        ensemble_ds=ds_ensemble,
+        ensemble_ds=ds_ensemble_summed,
         quantiles=stats.quantiles,
         metrics_df=fid_metrics
     )
-    fig.savefig(hydro_dir / f"hydrograph_{fid}.png", bbox_inches='tight')
+    fig.savefig(hydro_dir / f"hydrograph_gage_{gage}.png", bbox_inches='tight')
     plt.close(fig)
-    gc.collect() 
+    gc.collect()
 
 
 # Functions for producing visualizations based on the loaded domain data and calculated metrics
@@ -441,24 +479,31 @@ def produce_domain_specific_visualizations(domain_data: Dict, viz: VizConfig, io
     metrics_list = domain_data.get('metrics', [])
     metrics_df = pd.DataFrame(metrics_list) if metrics_list else None
     
-    # 1. Hydrographs
+    # Hydrographs
     if viz.hydrographs.enabled:
         hydro_dir = io.output_dir / "hydrographs"
         hydro_dir.mkdir(exist_ok=True)
         
         target_ids = viz.hydrographs.target_ids
-        valid_gage_df = None
+        gage_to_fids = domain_data.get('gage_to_fids', {})
+        gage_to_nexus = domain_data.get('gage_to_nexus', {})
+        
+        # Determine which gages to plot
         if not target_ids:
-            valid_gage_df = gdf[gdf['gage'].isin(obs_df.columns.values)]
-            valid_gage_df = valid_gage_df.loc[~valid_gage_df.index.duplicated(keep='first')]
-            if not valid_gage_df.empty:
-                target_ids = valid_gage_df.index.values
-            else:
-                target_ids = find_tailwater_feature(gdf.reset_index())
+            valid_gages = [str(g) for g in gage_to_fids.keys() if str(g) in obs_df.columns]
+        else:
+            # Match user input if they provided specific gage IDs
+            valid_gages = [g for g in gage_to_fids.keys() if any(str(t) in str(g) for t in target_ids)]
+            if not valid_gages: valid_gages = list(gage_to_fids.keys())[:5]
+            
+        # Collect all required FIDs to pre-load into memory
+        required_fids = []
+        for g in valid_gages:
+            required_fids.extend(gage_to_fids[g])
+        required_fids = list(set(required_fids))
+        valid_targets = np.intersect1d(required_fids, ds_stats.feature_id.values)
         
-        valid_targets = np.intersect1d(target_ids, ds_stats.feature_id.values)
-        logger.info(f"Pre-loading data for {len(valid_targets)} hydrographs into RAM...")
-        
+        logger.info(f"Pre-loading data for {len(valid_gages)} gage hydrographs into RAM...")
         ds_stats_subset = ds_stats.sel(feature_id=valid_targets).compute()
         
         ds_ensemble_subset = None
@@ -466,13 +511,23 @@ def produce_domain_specific_visualizations(domain_data: Dict, viz: VizConfig, io
             if 'feature_id' in ds_ensemble.dims:
                 ds_ensemble_subset = ds_ensemble.sel(feature_id=valid_targets).compute()
 
-        logger.info(f"Generating {len(valid_targets)} hydrographs in parallel...")
+        logger.info(f"Generating {len(valid_gages)} hydrographs in parallel...")
         
         with Timer("Plotting Hydrographs"):
             n_cores = max(1, multiprocessing.cpu_count() - 1)
             Parallel(n_jobs=n_cores)(
-                delayed(_render_single_hydrograph)(fid, ds_stats_subset, obs_df, valid_gage_df, viz, stats, ds_ensemble_subset, hydro_dir, metrics_df) 
-                for fid in valid_targets
+                delayed(_render_single_hydrograph)(
+                    gage, 
+                    gage_to_fids[gage],
+                    gage_to_nexus.get(gage),
+                    ds_stats_subset, 
+                    obs_df, 
+                    viz, 
+                    stats, 
+                    ds_ensemble_subset, 
+                    hydro_dir, 
+                    metrics_df
+                ) for gage in valid_gages
             )
     
     # Static Maps
@@ -483,7 +538,7 @@ def produce_domain_specific_visualizations(domain_data: Dict, viz: VizConfig, io
             for var in viz.static_maps.variables:
                 fig, ax = plt.subplots(figsize=(10, 10))
                 tviz.map_network(gdf, ds_stats, var_name=var, ax=ax, add_basemap=viz.static_maps.basemap)
-                # THE FIX: Name the map using 'domain', not a leftover 'fid' from a previous loop
+                
                 fig.savefig(map_dir / f"map_domain_{var}.png", bbox_inches='tight')
                 plt.close(fig)
     
@@ -493,21 +548,21 @@ def produce_domain_specific_visualizations(domain_data: Dict, viz: VizConfig, io
         anim_dir = io.output_dir / "animations"
         anim_dir.mkdir(exist_ok=True)
         
-        # 1. Filter by stream order
+        # Filter by stream order
         if 'order' in gdf.columns:
             gdf_anim = gdf[gdf['order'] >= viz.animation.min_stream_order]
         else:
             logger.warning("Stream order not found in geopackage, using all paths.")
             gdf_anim = gdf
             
-        # 2. Extract valid feature IDs and drop duplicates
+        # Extract valid feature IDs and drop duplicates
         anim_fids = gdf_anim.index.values
         common_anim_ids = np.intersect1d(anim_fids, ds_stats.feature_id.values)
         
         gdf_anim = gdf_anim.loc[common_anim_ids]
-        gdf_anim = gdf_anim[~gdf_anim.index.duplicated(keep='first')] # Ensure unique IDs
+        gdf_anim = gdf_anim[~gdf_anim.index.duplicated(keep='first')]
         
-        # 3. Time subsetting (e.g., '1H', '1D', '3D', '1W')
+        # Time subsetting (e.g., '1H', '1D', '3D', '1W')
         time_step_str = str(viz.animation.time_step).strip().upper()
         
         try:
@@ -519,12 +574,10 @@ def produce_domain_specific_visualizations(domain_data: Dict, viz: VizConfig, io
                 # Get difference between first two time steps
                 dt_native = pd.Timedelta(ds_stats.time.values[1] - ds_stats.time.values[0])
                 
-                # Handle 'W' (weeks) manually since pd.to_timedelta deprecated 'W' in recent versions
                 if time_step_str.endswith('W'):
                     val = int(time_step_str[:-1]) if len(time_step_str) > 1 else 1
                     dt_target = pd.Timedelta(days=val * 7)
                 else:
-                    # pd.to_timedelta handles '1H', '1D', '3D', etc. perfectly
                     dt_target = pd.to_timedelta(time_step_str)
                     
                 # Calculate how many integer steps to jump per frame
@@ -535,7 +588,7 @@ def produce_domain_specific_visualizations(domain_data: Dict, viz: VizConfig, io
         ds_anim_sliced = ds_stats.isel(time=slice(0, None, step))
         ds_anim_sliced = ds_anim_sliced.sel(feature_id=common_anim_ids).sortby('feature_id')
         
-        # 4. Generate
+        # Generate
         domain_name = domain_data.get('gage_obs', {}).get('domain_name', ['domain'])[0]
         out_gif = anim_dir / f"streamflow_animation_{domain_name}.gif"
         

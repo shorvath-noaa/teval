@@ -5,7 +5,6 @@ import time
 import logging
 from typing import Optional
 
-# MUST BE SET BEFORE IMPORTING PYPLOT to ensure process safety in Joblib
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -18,7 +17,9 @@ import contextily as cx
 
 def hydrograph(
     stats_ds: xr.Dataset, 
-    feature_id: int, 
+    feature_id: int = None, 
+    gage_id: str = None,
+    nexus_id: str = None,
     var_name: str = "streamflow", 
     ax=None, 
     obs_series=None,
@@ -26,7 +27,7 @@ def hydrograph(
     plot_members: bool = False,
     ensemble_ds: xr.Dataset = None,
     quantiles: list = [0.05, 0.95],
-    metrics_df: Optional[pd.DataFrame] = None # <-- NEW ARGUMENT
+    metrics_df: Optional[pd.DataFrame] = None
 ):
     """
     Plots mean, median, and uncertainty bounds (or individual members) with optional metrics.
@@ -34,14 +35,10 @@ def hydrograph(
     if ax is None:
         ax = plt.gca()
         
-    # Helper to generate a clean string of metrics for the legend (e.g. "(NSE: 0.85, KGE: 0.72)")
     def get_metrics_str(source_name: str) -> str:
         if metrics_df is None or metrics_df.empty: return ""
-        
-        # Find the row for this specific model/source
         row = metrics_df[metrics_df['source'].astype(str) == source_name]
         if row.empty: return ""
-        
         skip_cols = {'feature_id', 'gage_id', 'lat', 'lon', 'source', 'sig_class'}
         parts = []
         for col in row.columns:
@@ -49,15 +46,17 @@ def hydrograph(
                 val = row[col].iloc[0]
                 if isinstance(val, (int, float)):
                     parts.append(f"{col.upper()}: {val:.2f}")
-                    
         return f" ({', '.join(parts)})" if parts else ""
 
-    # 1. Select data
-    try:
-        data = stats_ds.sel(feature_id=feature_id)
-    except KeyError:
-        print(f"Error: Feature ID {feature_id} not found in dataset.")
-        return
+    # Select data safely
+    if feature_id is not None and 'feature_id' in stats_ds.dims:
+        try:
+            data = stats_ds.sel(feature_id=feature_id)
+        except KeyError:
+            print(f"Error: Feature ID {feature_id} not found in dataset.")
+            return
+    else:
+        data = stats_ds
     
     def get_flat(key, default=None):
         if f"{var_name}_{key}" in data:
@@ -95,57 +94,57 @@ def hydrograph(
     else:
         times = data.time.values
     
-    # 4. Plot Individual Members (Spaghetti) WITH METRICS
+    # Plot Individual Members (Spaghetti) with metrics
     if plot_members:
         if ensemble_ds is not None:
-            try:
+            if feature_id is not None and 'feature_id' in ensemble_ds.dims:
                 member_data = ensemble_ds[var_name].sel(feature_id=feature_id)
-                member_dim = None
-                dims_map = {d.lower(): d for d in member_data.dims}
-                for t in ['formulation_id', 'member', 'ensemble', 'run', 'formulation']:
-                    if t in dims_map:
-                        member_dim = dims_map[t]
-                        break
+            else:
+                member_data = ensemble_ds[var_name]
                 
-                if member_dim:
-                    n_members = member_data.sizes[member_dim]
-                    if n_members <= 20:
-                        colors = cm.tab20(np.linspace(0, 1, n_members))
-                    else:
-                        colors = cm.jet(np.linspace(0, 1, n_members))
-
-                    for i in range(n_members):
-                        trace = member_data.isel({member_dim: i}).values.flatten()
-                        try:
-                            # E.g., 'model_A'
-                            mid = str(member_data[member_dim].values[i])
-                            # Pull metrics specifically for 'model_A'
-                            lbl = f"{mid}{get_metrics_str(mid)}"
-                        except:
-                            lbl = f"Member {i}"
-
-                        ax.plot(times, trace, color=colors[i], alpha=0.7, 
-                                linewidth=1.0, label=lbl, zorder=1)
+            member_dim = None
+            dims_map = {d.lower(): d for d in member_data.dims}
+            for t in ['formulation_id', 'member', 'ensemble', 'run', 'formulation']:
+                if t in dims_map:
+                    member_dim = dims_map[t]
+                    break
+            
+            if member_dim:
+                n_members = member_data.sizes[member_dim]
+                if n_members <= 20:
+                    colors = cm.tab20(np.linspace(0, 1, n_members))
                 else:
-                    print(f"Warning: Could not identify member dimension.")
-            except Exception as e:
-                print(f"Warning: Could not plot members: {e}")
+                    colors = cm.jet(np.linspace(0, 1, n_members))
 
-    # 5. Plot Uncertainty Band
+                for i in range(n_members):
+                    trace = member_data.isel({member_dim: i}).values.flatten()
+                    try:
+                        mid = str(member_data[member_dim].values[i])
+                        lbl = f"{mid}{get_metrics_str(mid)}"
+                    except:
+                        lbl = f"Member {i}"
+
+                    ax.plot(times, trace, color=colors[i], alpha=0.7, 
+                            linewidth=1.0, label=lbl, zorder=1)
+            else:
+                print(f"Warning: Could not identify member dimension.")
+
+
+    # Plot Uncertainty Band
     if plot_uncertainty and not plot_members:
         pct = int(round(q_upper - q_lower, 2) * 100)
         band_label = f"{pct}% Uncertainty ({lbl_lower}-{lbl_upper})"
         ax.fill_between(times, p_lower, p_upper, color='gray', alpha=0.3, 
                         label=band_label, zorder=2)
     
-    # 6. Central Tendencies WITH METRICS
+    # Central Tendencies with metrics
     mean_label = f"Ensemble Mean{get_metrics_str('ensemble_mean')}"
     ax.plot(times, mean, 'k-', linewidth=2.5, label=mean_label, zorder=4)
     
     if median is not None:
         ax.plot(times, median, 'b--', linewidth=2.0, label='Ensemble Median', zorder=4)
     
-    # 7. Observations
+    # Observations
     if obs_series is not None:
         plot_tz = None
         if hasattr(times, 'tz'): plot_tz = times.tz
@@ -167,14 +166,18 @@ def hydrograph(
         except Exception:
             pass
             
-    ax.set_title(f"Ensemble Hydrograph: Feature {feature_id}")
+    title_parts = []
+    if gage_id: title_parts.append(f"Gage: {gage_id}")
+    if nexus_id: title_parts.append(f"Nexus: {nexus_id}")
+    if feature_id and not gage_id: title_parts.append(f"Feature: {feature_id}")
+    ax.set_title(f"Ensemble Hydrograph: {' | '.join(title_parts)}")
+    
     ax.set_ylabel(var_name)
     ax.set_xlabel("Time")
     
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
     
-    # Allow the legend to wrap nicely if it gets wide with metrics
     ax.legend(by_label.values(), by_label.keys(), loc='upper center', bbox_to_anchor=(0.5, -0.15), fontsize='small', ncol=2)
     ax.grid(True, alpha=0.3)
 
@@ -280,15 +283,28 @@ def map_metrics(
         
     else:
         gdf = gdf.to_crs(epsg=3857)
+        
+        vmin, vmax = None, None
+        extend_opt = 'neither'
+        
+        if variable.lower() in ['nse', 'kge']:
+            vmin, vmax = 0.0, 1.0
+            extend_opt = 'min'
+        elif variable.lower() == 'pbias':
+            vmin, vmax = -100.0, 100.0
+            extend_opt = 'both'
+            
         gdf.plot(
             column=variable, 
             ax=ax, 
             cmap=cmap, 
             legend=True, 
+            vmin=vmin,
+            vmax=vmax,
             markersize=marker_size,
             edgecolor='k',
             linewidth=0.3,
-            legend_kwds={'label': variable.upper(), 'shrink': 0.7},
+            legend_kwds={'label': variable.upper(), 'shrink': 0.7, 'extend': extend_opt},
             zorder=5
         )
 
