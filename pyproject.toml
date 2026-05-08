@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "teval"
-version = "0.1.0"
-description = "Analysis and evaluation toolkit for NextGen t-route ensemble outputs"
+version = "0.2.0"
+description = "Post-processing and evaluation toolkit for NextGen T-Route ensemble streamflow outputs"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "CC0-1.0"}
@@ -20,37 +20,41 @@ classifiers = [
 ]
 
 dependencies = [
-    "numpy",
-    "pandas",
-    "scipy",
-    "netCDF4",
-    "xarray",
-    "geopandas",
-    "matplotlib",
-    "contextily",
-    "folium",
-    "dataretrieval",
-    "shapely",
-    "PyYAML",
+    "numpy>=1.26.0,<3.0",
+    "pandas>=2.0.0",
+    "scipy>=1.11.0",
+    "xarray>=2024.1.0",
+    "dask>=2024.1.0",
+    "h5netcdf>=1.3.0",
+    "h5py>=3.10.0",
+    "netCDF4>=1.6.0",
+    "geopandas>=0.14.0",
+    "shapely>=2.0.0",
+    "contextily>=1.4.0",
+    "matplotlib>=3.8.0",
+    "folium>=0.15.0",
+    "Pillow>=10.0.0",
+    "PyYAML>=6.0",
     "pydantic>=2.0",
-    "Pillow"
+    "pyarrow>=14.0.0",
+    "dataretrieval>=1.0.0",
+    "joblib>=1.3.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest",
-    "pytest-cov"
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
 ]
+
+[project.urls]
+Repository = "https://github.com/shorvath-noaa/teval"
+Issues = "https://github.com/shorvath-noaa/teval/issues"
 
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = "-ra -q"
-testpaths = [
-    "tests",
-]
-# filterwarnings = [
-#     # Ignore the specific numpy binary incompatibility warning
-#     "ignore:numpy.ndarray size changed:RuntimeWarning",
-#     # Optional: Ignore other common harmless warnings if they appear later
-#     "ignore::DeprecationWarning:jupyter_client.*" 
-# ]
+testpaths = ["tests"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

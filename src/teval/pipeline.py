@@ -1,242 +1,423 @@
-import logging
-from pathlib import Path
-import pandas as pd
-import xarray as xr
-import matplotlib.pyplot as plt
-import teval.obs.usgs as tobs
-import teval.io as tio
-from teval.ensemble import SimpleEnsembler
-import teval.viz.static as tviz
-import teval.viz.interactive as tinteractive
-import teval.viz.animation as tanim
-from teval.config import TevalConfig
+"""
+teval.pipeline
 
-# Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+Single-domain execution and post-processing orchestration.
+
+This module owns all compute logic that was previously inline in __main__.
+__main__ calls these functions; it never touches dask, xarray, or
+ProcessPoolExecutor directly.
+
+Public API
+----------
+run_domain(domain_name, domain_dict, config)
+    Full lifecycle for one domain: time-slice → compute/write → metrics → viz.
+    Returns a list of metric-row dicts (empty list if metrics are disabled).
+
+run_skill_maps(metrics_df, config, domain_map)
+    Build all skill-map figures in parallel using ProcessPoolExecutor.
+
+run_interactive_map(metrics_df, config)
+    Render the Folium HTML interactive map.
+
+get_worker_count(config)
+    Return the number of workers to use, honouring SLURM_CPUS_PER_TASK when
+    running under Slurm.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Dict, List, Optional
+
+import dask
+import pandas as pd
+
+from teval.config import TevalConfig
+from teval import workflow
+from teval.utils import Timer
+
 logger = logging.getLogger(__name__)
 
-def get_time_range(ds_ensemble, ds_stats):
-    ds = ds_ensemble if ds_ensemble is not None else ds_stats
-    if ds is None:
-        raise ValueError("Cannot determine time range: neither Ensemble nor Stats data is loaded.")
-    t_start = pd.to_datetime(ds.time.min().values) - pd.Timedelta(days=1)
-    t_end = pd.to_datetime(ds.time.max().values) + pd.Timedelta(days=1)
-    return t_start.strftime("%Y-%m-%d"), t_end.strftime("%Y-%m-%d")
 
-def load_observations(io_config, start_date, end_date):
-    obs_df = None
-    if io_config.observations_file and io_config.observations_file.exists():
-        logger.info(f"Loading local observations from {io_config.observations_file}...")
-        try:
-            obs_df = tobs.load_usgs_csv(io_config.observations_file)
-        except Exception as e:
-            logger.error(f"Failed to read local obs file: {e}")
-    elif io_config.auto_download_usgs:
-        logger.info("Local observations not found. Attempting auto-download from USGS...")
-        if not io_config.hydrofabric_path or not io_config.hydrofabric_path.exists():
-            logger.warning("Cannot auto-download USGS data: Hydrofabric (for Gage IDs) is missing.")
-            return None
-        try:
-            logger.info("Reading Gage IDs from Hydrofabric flowpath-attributes...")
-            gdf_gages = tio.load_hydrofabric(io_config.hydrofabric_path, layer='flowpath-attributes')
-            if 'gage' in gdf_gages.columns:
-                site_ids = gdf_gages['gage'].dropna().unique().astype(str).tolist()
-                site_ids = [s for s in site_ids if len(s) >= 8] 
+# ---------------------------------------------------------------------------
+# Worker count helper
+# ---------------------------------------------------------------------------
+
+def get_worker_count(config) -> int:
+    """
+    Return the number of parallel workers for this run.
+
+    Respects SLURM_CPUS_PER_TASK when running inside a Slurm job so the
+    process never tries to use more cores than the scheduler allocated.
+    Falls back to config.system.cpu (-1 means all available cores).
+    """
+    slurm_cpus = os.environ.get("SLURM_CPUS_PER_TASK")
+    if slurm_cpus:
+        return int(slurm_cpus)
+    n = getattr(config.system, "cpu", -1)
+    return os.cpu_count() if n == -1 else n
+
+
+# ---------------------------------------------------------------------------
+# Dask compute + NC write
+# ---------------------------------------------------------------------------
+
+def compute_and_write(
+    domain_name: str,
+    domain_data: Dict,
+    domain_dict: Dict,
+    config: TevalConfig,
+) -> Dict:
+    """
+    Trigger the Dask compute graph and optionally write the ensemble NetCDF.
+
+    Two branches depending on config.system.stream_to_disk:
+
+    stream_to_disk = True (default)
+        Single dask.compute() pass that simultaneously:
+        - writes the full ensemble stats to {domain_name}_ensemble.nc
+        - extracts the gage-subset into RAM for metrics and hydrographs
+
+    stream_to_disk = False
+        Skips the NC write; extracts only the gage subset into RAM.
+
+    This function mutates domain_data in-place and returns it.
+
+    Parameters
+    ----------
+    domain_name:
+        Domain identifier used for logging and file naming.
+    domain_data:
+        The dict produced by workflow.load_domain_data().
+    domain_dict:
+        The raw entry from the domain map (used to check if a pre-computed
+        ensemble file already exists).
+    config:
+        Full TevalConfig instance.
+
+    Returns
+    -------
+    dict
+        The mutated domain_data dict with datasets replaced by
+        computed results.
+    """
+    build_from_raw = domain_dict["formulations"].get("ensemble_file") is None
+
+    if build_from_raw:
+        ds_stats_lazy   = domain_data["formulations"]["combined"]
+        ds_members_lazy = domain_data["formulations"].get("ensemble_members")
+
+        valid_fids  = workflow.get_gage_fids(domain_data, config.viz)
+        need_members = (
+            (config.metrics.per_formulation or config.viz.hydrographs.plot_members)
+            and ds_members_lazy is not None
+            and "feature_id" in ds_members_lazy.dims
+        )
+
+        write_flag = config.system.stream_to_disk is not False
+
+        if write_flag:
+            # Determine output path
+            if config.io.per_domain_output:
+                domain_out_dir = config.io.output_dir / domain_name
             else:
-                logger.warning("Hydrofabric 'flowpath-attributes' layer missing 'gage' column.")
-                return None
-            if not site_ids:
-                logger.warning("No linked Gage IDs found in hydrofabric.")
-                return None
-            logger.info(f"Querying USGS for {len(site_ids)} sites from {start_date} to {end_date}...")
-            df_new = tobs.fetch_usgs_streamflow(site_ids, start_date, end_date)
-            if not df_new.empty:
-                obs_df = df_new
-                if io_config.save_downloaded_obs is not None:
-                    save_path = io_config.save_downloaded_obs
-                    save_path.parent.mkdir(parents=True, exist_ok=True)
-                    obs_df.to_csv(save_path)
-                    logger.info(f"Downloaded USGS data saved to {save_path}")
-                else:
-                    logger.info("Downloaded data loaded (not saving to disk).")
-            else:
-                logger.warning("USGS query returned no data.")
-        except Exception as e:
-            logger.error(f"Auto-download failed: {e}")
-    return obs_df
+                domain_out_dir = config.io.output_dir
+            domain_out_dir.mkdir(parents=True, exist_ok=True)
+            out_nc = domain_out_dir / f"{domain_name}_ensemble.nc"
 
-def run_pipeline(config: TevalConfig):
-    io = config.io
-    data = config.data
-    stats_cfg = config.stats
-    viz = config.viz
+            n_feats = ds_stats_lazy.sizes.get("feature_id", 0)
+            logger.debug(
+                f"[{domain_name}] Writing {n_feats} features to disk and "
+                f"extracting {len(valid_fids)} gage FIDs into RAM..."
+            )
 
-    io.output_dir.mkdir(parents=True, exist_ok=True)
-
-    # 1. Load Ensemble
-    ds_ensemble = None
-    should_load_ensemble = stats_cfg.enabled or viz.hydrographs.plot_members
-    
-    if should_load_ensemble:
-        logger.info(f"Loading Ensemble Data from {io.input_dir}...")
-        try:
-            pattern = str(io.input_dir / io.ensemble_pattern)
-            ds_ensemble = tio.load_ensemble(pattern)
-            if data.time_slice:
-                start, end = data.time_slice
-                if isinstance(start, int):
-                    ds_ensemble = ds_ensemble.isel(time=slice(start, end))
-                else:
-                    ds_ensemble = ds_ensemble.sel(time=slice(str(start), str(end)))
-                logger.info(f"Time subset applied: {len(ds_ensemble.time)} steps.")
-        except Exception as e:
-            logger.error(f"Failed to load ensemble data: {e}")
-            if stats_cfg.enabled: raise 
-    else:
-        logger.info("Skipping ensemble load (Stats disabled and not plotting members).")
-
-    # 2. Statistics
-    ds_stats = None
-    stats_path = io.output_dir / io.stats_file
-
-    if stats_cfg.enabled:
-        if ds_ensemble is None:
-             raise ValueError("Stats calculation enabled but ensemble data not loaded.")
-        logger.info("Calculating Ensemble Statistics...")
-        # Instantiate the ensemble method
-        ensembler = SimpleEnsembler(quantiles=stats_cfg.quantiles)
-        # Calculate
-        ds_stats = ensembler.process(ds_ensemble)
-        logger.info(f"Saving statistics to {stats_path}...")
-        ds_stats.to_netcdf(stats_path)
-    else:
-        if stats_path.exists():
-            logger.info(f"Loading pre-calculated statistics from {stats_path}...")
-            ds_stats = xr.open_dataset(stats_path)
-            if data.time_slice:
-                try:
-                    start, end = data.time_slice
-                    if isinstance(start, int):
-                        ds_stats = ds_stats.isel(time=slice(start, end))
-                    else:
-                        ds_stats = ds_stats.sel(time=slice(str(start), str(end)))
-                    logger.info(f"Time subset applied to stats: {len(ds_stats.time)} steps.")
-                except Exception as e:
-                    logger.warning(f"Could not apply time_slice to loaded stats: {e}")
-        else:
-            msg = f"Stats calculation disabled, but {stats_path} does not exist."
-            logger.error(msg)
-            raise FileNotFoundError(msg)
-
-    # 3. Hydrofabric
-    hf_path = io.hydrofabric_path
-    if not hf_path:
-        gpkg_files = list(io.input_dir.glob("*.gpkg"))
-        if gpkg_files: 
-            hf_path = gpkg_files[0]
-            io.hydrofabric_path = hf_path 
-
-    if not hf_path or not hf_path.exists():
-        logger.warning("No hydrofabric found. Spatial plots and gage lookups will be skipped.")
-
-    # 4. Observations
-    obs_df = None
-    gdf_gages = None 
-    try:
-        start_date, end_date = get_time_range(ds_ensemble, ds_stats)
-        obs_df = load_observations(io, start_date, end_date)
-        if hf_path and hf_path.exists() and (viz.hydrographs.enabled and obs_df is not None):
-             try:
-                gdf_gages = tio.load_hydrofabric(hf_path, layer='flowpath-attributes')
-             except Exception:
-                pass
-        if obs_df is not None:
-             logger.info(f"Observations ready. Sites: {obs_df.shape[1]}")
-    except Exception as e:
-        logger.error(f"Observation setup failed: {e}")
-
-    # 5. Visualizations
-    gdf_hydro = None
-    def ensure_hydrofabric_loaded():
-        nonlocal gdf_hydro
-        if gdf_hydro is None and hf_path and hf_path.exists():
-            logger.info(f"Loading Hydrofabric Geometries from {hf_path.name}...")
-            gdf_hydro = tio.load_hydrofabric(hf_path)
-        return gdf_hydro
-
-    # A. Hydrographs
-    if viz.hydrographs.enabled:
-        logger.info("Generating Hydrographs...")
-        hydro_dir = io.output_dir / "hydrographs"
-        hydro_dir.mkdir(exist_ok=True)
-        
-        target_ids = viz.hydrographs.target_ids
-        if not target_ids:
-            target_ids = ds_stats.feature_id.values[:5].tolist()
-            
-        for fid in target_ids:
-            try:
-                fig, ax = plt.subplots(figsize=(12, 6))
-                
-                series_obs = None
-                if gdf_gages is not None and obs_df is not None:
-                    if fid in gdf_gages.index:
-                        gage_id = gdf_gages.loc[fid].get('gage')
-                        if gage_id and str(gage_id) in obs_df.columns:
-                            series_obs = obs_df[str(gage_id)]
-
-                tviz.hydrograph(
-                    ds_stats, 
-                    feature_id=fid, 
-                    ax=ax, 
-                    obs_series=series_obs,
-                    plot_uncertainty=viz.hydrographs.plot_uncertainty,
-                    plot_members=viz.hydrographs.plot_members,
-                    ensemble_ds=ds_ensemble,
-                    quantiles=stats_cfg.quantiles
+            with Timer(
+                f"[{domain_name}] Compute + Write + Extract Gage Subset",
+                category="output",
+            ):
+                write_task        = ds_stats_lazy.astype("float32").to_netcdf(
+                    out_nc, engine="h5netcdf", compute=False
                 )
-                fig.savefig(hydro_dir / f"hydrograph_{fid}.png")
-                plt.close(fig)
-            except Exception as e:
-                logger.error(f"Failed to plot hydrograph for {fid}: {e}")
+                gage_stats_lazy   = ds_stats_lazy.sel(feature_id=valid_fids)
+                compute_targets   = [write_task, gage_stats_lazy]
+                if need_members:
+                    compute_targets.append(ds_members_lazy.sel(feature_id=valid_fids))
+                results = dask.compute(*compute_targets)
 
-    # B. Static Maps
-    if viz.static_maps.enabled:
-        gdf = ensure_hydrofabric_loaded()
-        if gdf is not None:
-            logger.info("Generating Static Maps...")
-            map_dir = io.output_dir / "maps"
-            map_dir.mkdir(exist_ok=True)
-            for var in viz.static_maps.variables:
+            domain_data["formulations"]["combined"] = results[1]
+            domain_data["formulations"]["ensemble_members"] = results[2] if need_members else None
+            domain_data["formulations"]["_full_nc_path"] = out_nc
+            logger.debug(f"[{domain_name}] Ensemble written -> {out_nc}")
+
+        else:
+            logger.debug(
+                f"[{domain_name}] Extracting {len(valid_fids)} gage FIDs into RAM "
+                "(stream_to_disk=false, skipping NC write)..."
+            )
+            with Timer(f"[{domain_name}] Compute Gage Subset", category="loading"):
+                compute_targets = [ds_stats_lazy.sel(feature_id=valid_fids)]
+                if need_members:
+                    compute_targets.append(ds_members_lazy.sel(feature_id=valid_fids))
+                results = dask.compute(*compute_targets)
+
+            domain_data["formulations"]["combined"] = results[0]
+            domain_data["formulations"]["ensemble_members"] = results[1] if need_members else None
+            domain_data["formulations"]["_full_nc_path"] = None
+
+    else:
+        # Pre-computed ensemble: record its path for animation, then pull the
+        # gage subset into RAM for metrics / hydrographs.
+        domain_data["formulations"]["_full_nc_path"] = (
+            domain_dict["formulations"]["ensemble_file"]
+        )
+        valid_fids = workflow.get_gage_fids(domain_data, config.viz)
+        if len(valid_fids) > 0:
+            with Timer(
+                f"[{domain_name}] Extract Gage Subset (pre-computed)",
+                category="loading",
+            ):
+                ds_full = domain_data["formulations"]["combined"].chunk(
+                    {"time": -1, "feature_id": "auto"}
+                )
+                domain_data["formulations"]["combined"] = (
+                    ds_full.sel(feature_id=valid_fids).compute()
+                )
+
+    return domain_data
+
+
+# ---------------------------------------------------------------------------
+# Single-domain processing
+# ---------------------------------------------------------------------------
+
+def run_domain(
+    domain_name: str,
+    domain_dict: Dict,
+    config: TevalConfig,
+) -> List[Dict]:
+    """
+    Execute the full pipeline for a single domain.
+
+    Steps
+    -----
+    1. Load data (hydrofabric, observations, lazy formulation datasets)
+    2. Apply optional time slice
+    3. Compute ensemble stats and write NC (compute_and_write)
+    4. Calculate metrics
+    5. Produce per-domain visualisations (hydrographs, animation)
+
+    Parameters
+    ----------
+    domain_name:
+        Domain identifier.
+    domain_dict:
+        Entry from the domain map produced by io.initialize_domains().
+    config:
+        Full TevalConfig instance.
+
+    Returns
+    -------
+    list[dict]
+        Metric rows for this domain (empty list if metrics are disabled or
+        no valid obs/sim overlap exists).
+    """
+    # ------------------------------------------------------------------
+    # Load domain data
+    # ------------------------------------------------------------------
+    with Timer(f"[{domain_name}] Load Data", category="loading"):
+        domain_data = workflow.load_domain_data(domain_dict, config.io, config.stats)
+
+    # ------------------------------------------------------------------ 
+    # Time slice
+    # ------------------------------------------------------------------
+    if config.data.time_slice and len(config.data.time_slice) == 2:
+        t_start, t_end = config.data.time_slice
+        logger.debug(f"[{domain_name}] Slicing time -> {t_start} to {t_end}.")
+        combined = domain_data["formulations"].get("combined")
+        members  = domain_data["formulations"].get("ensemble_members")
+        if combined is not None:
+            domain_data["formulations"]["combined"] = combined.sel(
+                time=slice(t_start, t_end)
+            )
+        if members is not None:
+            domain_data["formulations"]["ensemble_members"] = members.sel(
+                time=slice(t_start, t_end)
+            )
+
+    # ------------------------------------------------------------------
+    # Compute + write
+    # ------------------------------------------------------------------
+    domain_data = compute_and_write(domain_name, domain_data, domain_dict, config)
+
+    # ------------------------------------------------------------------
+    # Calculate metrics
+    # ------------------------------------------------------------------
+    metric_rows: List[Dict] = []
+    if config.metrics.enabled:
+        n_gages = len(domain_data.get("gage_to_fids", {}))
+        logger.debug(f"[{domain_name}] Computing metrics for {n_gages} gages...")
+        with Timer(f"[{domain_name}] Metrics", category="metrics"):
+            metric_rows = workflow.calculate_metrics(domain_data, config.metrics)
+            domain_data["metrics"] = metric_rows
+
+    # ------------------------------------------------------------------
+    # Per-domain visualisations
+    # ------------------------------------------------------------------
+    viz_enabled = config.viz.hydrographs.enabled or config.viz.animation.enabled
+    if viz_enabled:
+        with Timer(f"[{domain_name}] Visualizations", category="visualization"):
+            workflow.produce_domain_specific_visualizations(
+                domain_data, config.viz, config.io, config.stats
+            )
+
+    logger.debug(f"[{domain_name}] Done.")
+    return metric_rows
+
+
+# ---------------------------------------------------------------------------
+# Picklable top-level worker (needed by ProcessPoolExecutor)
+# ---------------------------------------------------------------------------
+
+def _run_skill_map_task(task_spec):
+    """
+    Top-level picklable worker for parallel skill-map rendering.
+    ``task_spec`` is a ``(fn_name, kwargs)`` tuple.
+    """
+    import logging as _logging
+    _logging.basicConfig(level=_logging.WARNING)
+    from teval.viz import static as tviz
+    fn_name, kwargs = task_spec
+    getattr(tviz, fn_name)(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Post-processing: skill maps and interactive map
+# ---------------------------------------------------------------------------
+
+def run_skill_maps(
+    metrics_df: pd.DataFrame,
+    config: TevalConfig,
+    domain_map: Optional[Dict] = None,
+) -> None:
+    """
+    Build all configured skill-map figures in parallel.
+    Handles score maps, winner maps, boxplots, and VPU breakdowns.
+
+    Parameters
+    ----------
+    metrics_df:
+        Combined metrics DataFrame from all processed domains.
+    config:
+        Full TevalConfig instance.
+    domain_map:
+        The domain map returned by io.initialize_domains().  Required
+        only when config.io.per_domain_output is True (used to filter
+        metrics to tailwater gages).  Pass None or {} otherwise.
+    """
+    from teval.viz.static import build_vpu_map
+
+    skill_dir = config.io.output_dir / "skill_maps"
+    skill_dir.mkdir(parents=True, exist_ok=True)
+
+    # Filter to tailwater gages when per-domain output is enabled
+    if config.io.per_domain_output and domain_map:
+        tailwater_gages = set(domain_map.keys())
+        n_before = len(metrics_df)
+        metrics_df_skill = metrics_df[metrics_df["gage_id"].isin(tailwater_gages)].copy()
+        logger.info(
+            f"Skill maps: filtered to {len(tailwater_gages)} tailwater gages "
+            f"({len(metrics_df_skill)} rows from {n_before} total)."
+        )
+    else:
+        metrics_df_skill = metrics_df
+
+    # Build VPU map if needed
+    vpu_map: dict = {}
+    if config.viz.skill_maps.vpu_breakdown:
+        with Timer("Build VPU Map", category="loading"):
+            vpu_map = build_vpu_map(config.io.hydrofabric_dir)
+            logger.info(
+                f"VPU map: {len(vpu_map)} gages mapped."
+                if vpu_map else "No VPU map available; skipping breakdown."
+            )
+
+    # Assemble task list
+    tasks: list = []
+    for metric in config.viz.skill_maps.variables:
+        if metric not in metrics_df_skill.columns:
+            logger.warning(f"Metric '{metric}' not in metrics DataFrame. Skipping.")
+            continue
+
+        if config.viz.skill_maps.score_maps:
+            for src in metrics_df_skill["source"].unique():
+                tasks.append(("map_metrics", dict(
+                    metrics_df=metrics_df_skill[metrics_df_skill["source"] == src],
+                    variable=metric,
+                    output_path=skill_dir / f"map_{metric}_{src}.png",
+                    add_basemap=config.viz.skill_maps.basemap,
+                    title=f"{metric.upper()} — {src}",
+                )))
+
+        if config.viz.skill_maps.winner_maps:
+            tasks.append(("plot_winner_map", dict(
+                metrics_df=metrics_df_skill,
+                metric=metric,
+                output_path=skill_dir / f"map_winner_{metric}.png",
+                add_basemap=config.viz.skill_maps.basemap,
+            )))
+
+        if config.viz.skill_maps.boxplots:
+            tasks.append(("plot_boxplots", dict(
+                metrics_df=metrics_df_skill,
+                metric=metric,
+                output_path=skill_dir / f"boxplot_{metric}.png",
+            )))
+
+        if config.viz.skill_maps.vpu_breakdown and vpu_map:
+            tasks.append(("plot_vpu_breakdown", dict(
+                metrics_df=metrics_df_skill,
+                metric=metric,
+                output_path=skill_dir / f"vpu_breakdown_{metric}.png",
+                vpu_map=vpu_map,
+            )))
+
+    if not tasks:
+        logger.info("No skill map tasks to run.")
+        return
+
+    n_workers = min(len(tasks), get_worker_count(config))
+    logger.info(f"Rendering {len(tasks)} skill map(s) with {n_workers} workers...")
+
+    with Timer(f"Skill Maps ({len(tasks)} total)", category="visualization"):
+        with ProcessPoolExecutor(max_workers=n_workers) as pool:
+            futures = {pool.submit(_run_skill_map_task, t): t for t in tasks}
+            for fut in as_completed(futures):
+                fn_name, kw = futures[fut]
+                out_path = kw.get("output_path", "?")
                 try:
-                    fig, ax = plt.subplots(figsize=(10, 10))
-                    tviz.map_network(gdf, ds_stats, var_name=var, ax=ax, add_basemap=viz.static_maps.basemap)
-                    fig.savefig(map_dir / f"map_{var}.png")
-                    plt.close(fig)
-                except Exception as e:
-                    logger.error(f"Failed to plot map for {var}: {e}")
+                    fut.result()
+                    logger.info(f"  + {out_path.name}")
+                except Exception as exc:
+                    logger.error(f"  X {out_path.name}: {exc}")
 
-    # C. Interactive
-    if viz.interactive_map.enabled:
-        gdf = ensure_hydrofabric_loaded()
-        if gdf is not None:
-            logger.info("Generating Interactive Map...")
-            out_html = io.output_dir / "interactive_map.html"
-            try:
-                tinteractive.map_folium(gdf, ds_stats, var_name=viz.interactive_map.variable, output_html=str(out_html))
-            except Exception as e:
-                 logger.error(f"Failed to generate interactive map: {e}")
 
-    # D. Animation
-    anim = viz.animation
-    if anim.enabled:
-        gdf = ensure_hydrofabric_loaded()
-        if gdf is not None:
-            logger.info("Generating Animation...")
-            out_gif = io.output_dir / f"animation_{anim.variable}.gif"
-            try:
-                tanim.animate_network(gdf, ds_stats, output_path=str(out_gif), var_name=anim.variable, fps=anim.fps, log_scale=anim.log_scale, cmap_name=anim.cmap)
-            except Exception as e:
-                logger.error(f"Failed to generate animation: {e}")
+def run_interactive_map(metrics_df: pd.DataFrame, config: TevalConfig) -> None:
+    """
+    Render the Folium interactive HTML metrics map.
 
-    logger.info(f"Pipeline finished. Results in {io.output_dir}")
+    Parameters
+    ----------
+    metrics_df:
+        Combined metrics DataFrame from all processed domains.
+    config:
+        Full TevalConfig instance.
+    """
+    from teval.viz.interactive import plot_interactive_metrics_map
+
+    with Timer("Interactive Map", category="visualization"):
+        plot_interactive_metrics_map(
+            metrics_df,
+            output_path=config.io.output_dir / "interactive_metrics_map.html",
+        )

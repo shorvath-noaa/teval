@@ -213,8 +213,10 @@ __marimo__/
 *.ncdf
 *.gpkg
 *.db
+*.yaml
 /data/
 /output/
 
 # IDE settings (optional but helpful)
-.vscode/
+.vscode/*.yaml
+notebooks/demo_output/
