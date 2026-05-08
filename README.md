@@ -94,7 +94,6 @@ Full documentation is available on the [GitHub Wiki](https://github.com/shorvath
 - [Installation](https://github.com/shorvath-noaa/teval/wiki/Installation)
 - [Configuration Reference](https://github.com/shorvath-noaa/teval/wiki/Configuration)
 - [Architecture Overview](https://github.com/shorvath-noaa/teval/wiki/Architecture)
-- [Running on HPC (Ursa)](https://github.com/shorvath-noaa/teval/wiki/HPC)
 - [Output Reference](https://github.com/shorvath-noaa/teval/wiki/Outputs)
 
 ## License
