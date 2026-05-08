@@ -1,111 +1,102 @@
-# teval: T-Route Ensemble Evaluation Toolkit
+# teval
 
-**teval** is a Python library and command-line tool designed to streamline the evaluation of NextGen t-route ensemble outputs. It automates reading NetCDF ensemble files, calculating statistical summaries, and generating visualizations.
+**teval** is a Python post-processing and evaluation toolkit for [NextGen National Water Model](https://github.com/NOAA-OWP/ngen) ensemble streamflow outputs routed through [T-Route](https://github.com/NOAA-OWP/t-route). It combines multi-formulation T-Route outputs into an ensemble NetCDF product, computes skill metrics against USGS observations, and produces a suite of visualizations.
 
-## 🌟 Key Features
-* **Config-Driven Workflow:** Control everything via a simple YAML configuration file.
-* **Smart Caching:** Calculates ensemble statistics once, saves them to disk, and reuses them for rapid visualization.
-* **Ensemble Analysis:** Automatically computes mean, median, and user-defined uncertainty quantiles (e.g., 5th/95th).
-* **Rich Visualization:**
-    * **Hydrographs:** Standard uncertainty bands (p05-p95) or detailed "Spaghetti Plots" of individual members.
-    * **Maps:** Static choropleth maps and interactive HTML (Folium) maps.
-    * **Animations:** Generate time-series GIFs of streamflow across the network.
-* **USGS Integration:** Auto-fetches and caches USGS gage observations for validation metrics.
+## Overview
 
-## 📦 Installation
+teval sits at the end of a NextGen modeling workflow:
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/shorvath-noaa/teval
-    cd teval
-    ```
-
-2.  **Create a virtual environment (Recommended):**
-    ```bash
-    python -m venv .venv
-    source .venv/bin/activate
-    ```
-
-3.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    pip install .
-    ```
-
-## 🚀 Quick Start (Command Line)
-
-The easiest way to use `teval` is through the command line interface (CLI).
-
-**0. (Optional) Generate Sample Data:**
-
-If you don't have your own model output yet, you can generate realistic dummy data using the included script. You must provide a valid hydrofabric GeoPackage. First, make a `data/` directory:
-```bash
-mkdir data
+```
+T-Route NetCDF outputs (one per formulation)
+    │
+    ▼  teval
+    ├── ensemble_stats.nc     ← primary operational output
+    ├── metrics.csv           ← KGE, NSE, PBIAS per gage per formulation
+    ├── hydrographs/          ← observed vs simulated per gage
+    ├── skill_maps/           ← spatial score, winner, and boxplot maps
+    ├── interactive_map.html  ← Folium metric map
+    └── animation.gif         ← time-lapse streamflow propagation
 ```
 
-Then, put your geopackage in this directory and run the script to generate sample data.
+## Installation
+
 ```bash
-# Usage: python create_dummy_data.py <path_to_gpkg>
-python create_dummy_data.py data/gage_10023000.gpkg
+git clone https://github.com/shorvath-noaa/teval
+cd teval
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
 ```
 
-This will create 10 ensemble NetCDF files in the `data/` directory.
+## Quick Start
 
-**1. Generate a default configuration file:**
+**1. Generate a default config file:**
 ```bash
 python -m teval --init
 ```
 
-This creates a teval_default_config.yaml file in your directory.
+**2. Edit `teval_default_config.yaml`** — set your input paths, output directory, and enable the outputs you want.
 
-**2. Edit the configuration:**
-Open `teval_default_config.yaml` and adjust paths, feature IDs, and visualization settings.
-
-**3. Run the main workflow**
+**3. Run:**
 ```bash
-python -m teval -c teval_default_config.yaml
+python -m teval -c teval_config.yaml
 ```
 
-**4. Need help?**
-
-View a description of every confiuration parameter:
+**4. View all config options:**
 ```bash
 python -m teval --help-config
 ```
 
-## 📖 Python API Usage
-You can also use `teval` as a library within your own scripts or notebooks:
-``` python
-from teval.config import TevalConfig
-from teval.pipeline import run_pipeline
+## Configuration
 
-# Load config
-config = TevalConfig.from_yaml("teval_config.yaml")
+teval is entirely config-driven. A single YAML file controls all I/O paths, system options, ensemble statistics, metrics, and visualizations. See the [Configuration Wiki](https://github.com/shorvath-noaa/teval/wiki/Configuration) for a full reference.
 
-# Override settings programmatically
-config.viz.animation.enabled = True
-config.viz.hydrographs.plot_members = True
+Example configs for CONUS and multi-domain calibration runs are provided in `configs/`.
 
-# Run
-run_pipeline(config)
+## Outputs
+
+| Output | Description |
+|---|---|
+| `*_ensemble.nc` | Ensemble statistics NetCDF (mean, spread). Primary operational product. |
+| `metrics.csv` | KGE, NSE, PBIAS per gage per formulation and ensemble mean. |
+| `hydrographs/` | Per-gage observed vs simulated hydrograph PNGs. |
+| `skill_maps/` | Score maps, winner maps, boxplots, VPU breakdown figures. |
+| `interactive_metrics_map.html` | Folium interactive map of skill metrics. |
+| `animation.gif` | Time-lapse GIF of streamflow propagation. |
+
+## Two Operational Modes
+
+**Full CONUS** — single large domain, ~800k flowpaths. Uses Dask lazy evaluation and a single-pass compute to write the ensemble NC and extract gage subsets simultaneously.
+
+**Multi-domain calibration** — hundreds of small independent domains (one per USGS gage upstream catchment). Used for formulation calibration and ensemble method training.
+
+## Repository Structure
+
+```
+src/teval/
+├── __main__.py         CLI entry point
+├── pipeline.py         Single-domain lifecycle orchestration
+├── workflow.py         Data loading, metrics, per-domain visualization dispatch
+├── config.py           Pydantic configuration models
+├── utils.py            Timer, logging, timing registry
+├── io/                 Input discovery, hydrofabric loading, observation loading
+├── ensemble_methods/   Ensemble stat computation (mean, spread)
+├── metrics/            NSE, KGE, PBIAS, significance testing
+├── viz/                Static maps, interactive map, animation
+├── obs/                USGS observation retrieval
+└── experimental/       In-development features (performance-weighted mean)
 ```
 
-## 📂 Output Structure
-The tool organizes results automatically:
-```bash
-output/
-├── ensemble_stats.nc
-├── interactive_map.html
-├── hydrographs/
-│   ├── hydrograph_2860507.png
-│   └── hydrograph_2860516.png
-├── maps/
-│   └── map_streamflow_mean.png
-└── animation_streamflow_mean.gif
-```
+## Documentation
 
-## 🧪 Testing
-Run the test suite to ensure everything is working correctly:
-```bash
-pytest
-```
+Full documentation is available on the [GitHub Wiki](https://github.com/shorvath-noaa/teval/wiki):
+
+- [Installation](https://github.com/shorvath-noaa/teval/wiki/Installation)
+- [Configuration Reference](https://github.com/shorvath-noaa/teval/wiki/Configuration)
+- [Architecture Overview](https://github.com/shorvath-noaa/teval/wiki/Architecture)
+- [Running on HPC (Ursa)](https://github.com/shorvath-noaa/teval/wiki/HPC)
+- [Output Reference](https://github.com/shorvath-noaa/teval/wiki/Outputs)
+
+## License
+
+CC0-1.0 — See [LICENSE](LICENSE) for details.

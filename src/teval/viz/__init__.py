@@ -1,4 +1,5 @@
-# src/teval/viz/__init__.py
+"""teval.viz — Visualization subpackage."""
+
 from . import static
 
 # Try to import interactive, but fail gracefully if dependencies are missing
