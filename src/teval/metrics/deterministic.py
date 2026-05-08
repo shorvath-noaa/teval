@@ -1,3 +1,5 @@
+"""Deterministic scalar skill metrics: NSE, KGE, PBIAS, peak flow/timing error."""
+
 import numpy as np
 import pandas as pd
 

@@ -1,213 +1,368 @@
+"""Pydantic configuration models for the teval pipeline."""
+
 import yaml
 import textwrap
 from pathlib import Path
-from typing import List, Optional, Union, Literal
+from typing import List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 
-# Define Sub-Models for Sections
+
 class IOConfig(BaseModel):
     """Configuration for Input/Output paths and file patterns."""
-    
-    
-    #TODO: UPDATE THIS FOR SPECIFIC CALIBRATION OUTPUT DIRECTORY STRUCTURE
-    
-    troute_netcdf_dir: Path = Field(
-        default=None, 
-        description="Directory where all t-route output files are stored. These will be loaded to calculate ensemble statistics."
+
+    troute_netcdf_dir: Optional[Path] = Field(
+        default=None,
+        description=(
+            "Directory containing T-Route output subdirectories. "
+            "Each subdir must follow naming: '{formulation}_{domain}_output' "
+            "(directory_naming='suffix') or be nested under a domain folder "
+            "(directory_naming='parent')."
+        ),
     )
-    ensemble_netcdf_dir: Path = Field(
-        default=None, 
-        description="Directory where all pre-computed ensemble files are stored."
-    )
-    
-    
-    
-    input_dir: Union[Path, str, List[Path]] = Field(
-        default=Path("data"), 
-        description="Path to input data. Can be: 1) A single directory, 2) A glob pattern string (e.g. 'runs/basin_*'), or 3) A list of directories."
-    )
-    output_dir: Path = Field(
-        default=Path("output"), 
-        description="Directory where all results (plots, maps, GIFs) will be saved."
-    )
-    ensemble_pattern: str = Field(
-        default="troute_output_formulation_*.nc", 
-        description="Glob pattern to match NetCDF ensemble member files within input_dir."
-    )
-    stats_file: Path = Field(
-        default=Path("ensemble_stats.nc"),
-        description="Filename for the pre-calculated ensemble statistics. Used to cache results."
-    )
-    hydrofabric_path: Optional[Path] = Field(
-        default=None, 
-        description="Path to the specific hydrofabric GeoPackage (.gpkg)."
+    ensemble_netcdf_dir: Optional[Path] = Field(
+        default=None,
+        description="Directory containing pre-computed ensemble NC files.",
     )
     hydrofabric_dir: Path = Field(
-        default=Path("data/domain"),
-        description="Directory containing the hydrofabric geopackages (e.g. 'gage_10023000.gpkg')."
+        default=Path("data/hydrofabric"),
+        description=(
+            "Directory containing hydrofabric GeoPackages. "
+            "Files matched by domain name: '*{domain_name}*.gpkg'."
+        ),
     )
     observations_file: Optional[Path] = Field(
-        default=None, 
-        description="Path to a file containing observations for validation. Supports .csv or .parquet."
+        default=None,
+        description=(
+            "Path to observations file (.csv or .parquet). "
+            "Columns = gage IDs (strings), index = datetime."
+        ),
     )
     auto_download_usgs: bool = Field(
         default=False,
-        description="If True and observations_file is missing/null, download data from USGS for all gages in the domain."
+        description=(
+            "If True and observations_file is missing, automatically download "
+            "streamflow data from USGS NWIS for all gages found in the hydrofabric."
+        ),
     )
     save_downloaded_obs: Optional[Path] = Field(
         default=None,
-        description="If provided, auto-downloaded USGS data will be saved to this specific path (e.g., 'data/usgs_cache.csv'). If null, data is not saved."
+        description=(
+            "Path to cache auto-downloaded USGS observations. "
+            "If null, downloaded data is not saved to disk."
+        ),
+    )
+    output_dir: Path = Field(
+        default=Path("output"),
+        description="Root directory for all outputs (plots, maps, CSVs, animations).",
+    )
+    per_domain_output: bool = Field(
+        default=True,
+        description=(
+            "If True, each domain's outputs are saved to output_dir/{domain_name}/. "
+            "If False, all outputs go to output_dir/ (useful for single-domain CONUS runs)."
+        ),
+    )
+    directory_naming: Literal["suffix", "parent"] = Field(
+        default="suffix",
+        description=(
+            "Controls how domain name is extracted from the run directory structure.\n"
+            "  'suffix': last underscore-segment of '{formulation}_{domain}_output'.\n"
+            "  'parent': parent directory name is the domain "
+            "(e.g. runs/12009000/cfe_output/)."
+        ),
+    )
+    metrics_output_file: Optional[str] = Field(
+        default="metrics.csv",
+        description=(
+            "Filename for the combined metrics CSV, saved to output_dir. "
+            "Set to null to skip saving."
+        ),
     )
 
-    @field_validator("input_dir")
-    def validate_input_dir(cls, v):
-        if isinstance(v, str):
-            if "*" in v:
-                return v
-            return Path(v)
-        return v
-    
-    @field_validator("output_dir")
+    @field_validator("output_dir", mode="before")
     def convert_to_path(cls, v):
+        """Convert a string value to a Path object."""
         return Path(v) if v else v
 
+
 class SystemConfig(BaseModel):
-    """Configuration for system resources."""
+    """Configuration for system resources, execution strategy, and runtime behavior."""
+
     cpu: int = Field(
-        default=1,
-        ge=1,
-        description="Number of processes to use for parallel data loading. Set to >1 to enable parallel mode."
+        default=-1,
+        description=(
+            "Number of CPUs for within-domain parallelism (hydrograph rendering, "
+            "animation frames). -1 = use all available cores."
+        ),
     )
-    
+    domain_workers: int = Field(
+        default=1,
+        description=(
+            "Number of domains to process simultaneously. "
+            "1 = serial (default, safe for debugging). "
+            "-1 = let the planner auto-select based on domain scale and CPU count. "
+            "Any value > 1 = explicit parallelism override."
+        ),
+    )
+    stream_to_disk: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Whether to write the full computed ensemble statistics to a NetCDF "
+            "file on disk. The *_ensemble.nc is the PRIMARY OUTPUT of this "
+            "pipeline — the final post-processed ensemble value for every "
+            "feature_id at every timestep. Metrics and figures are "
+            "derived from it.\n"
+            "  true or null (default) = write the ensemble NC.\n"
+            "  false = skip the write; compute only the gage-associated feature "
+            "subset into RAM. Use only when you explicitly do not need the "
+            "output NC — e.g. a quick metrics-only re-run when the ensemble NC "
+            "already exists on disk and is pointed to by ensemble_netcdf_dir."
+        ),
+    )
+    use_dask: Optional[bool] = Field(
+    default=None,
+    description=(
+        "Use Dask for lazy/parallel array loading via xr.open_mfdataset. "
+        "null (recommended) = auto-detect. "
+        "true = force Dask. false = force eager loading."
+        ),
+    )
+    logging_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(
+        default="INFO",
+        description=(
+            "Controls log verbosity for the entire run.\n"
+            "  DEBUG   : very detailed internal state (development use)\n"
+            "  INFO    : standard progress messages (recommended)\n"
+            "  WARNING : only warnings and errors\n"
+            "  ERROR   : only errors"
+        ),
+    )
+    timing: Literal["none", "simple", "verbose"] = Field(
+        default="simple",
+        description=(
+            "Controls execution timing output.\n"
+            "  none    : timing disabled entirely\n"
+            "  simple  : timings recorded silently; a summary table is printed at "
+            "the end of the run\n"
+            "  verbose : start/end of each timed block is logged immediately and "
+            "a summary table is printed at the end"
+        ),
+    )
+
+
 class DataConfig(BaseModel):
     """Configuration for data slicing and subsetting."""
+
     time_slice: Optional[List[Union[int, str]]] = Field(
-        default=None, 
-        description="Subset the data by time. Can be indices [0, 48] or ISO dates ['2023-01-01', '2023-01-03']. Set to null to use all time."
+        default=None,
+        description=(
+            "Subset the data by time. Provide two ISO date strings: "
+            "['2023-01-01', '2023-12-31']. Set to null to use all available time."
+        ),
     )
     feature_ids: Union[List[int], Literal["all"]] = Field(
-        default="all", 
-        description="List of integer Feature IDs to process. Use 'all' to process the entire domain."
+        default="all",
+        description=(
+            "List of integer Feature IDs to process. Use 'all' to process "
+            "every feature in the domain."
+        ),
     )
+
 
 class StatsConfig(BaseModel):
-    """Configuration for statistical calculations."""
-    enabled: bool = Field(
-        default=True,
-        description="Whether to calculate statistics from the ensemble files. If False, the pipeline attempts to load pre-calculated stats from 'stats_file'."
-    )
-    quantiles: List[float] = Field(
-        default=[0.05, 0.95], 
-        description="Quantiles to calculate for uncertainty bands (0.0 to 1.0)."
-    )
+    """Configuration for ensemble statistical calculations."""
 
+    quantiles: List[float] = Field(
+        default=[0.05, 0.95],
+        description=(
+            "Quantile bounds for ensemble uncertainty bands (values between 0.0 and 1.0). "
+            "Example: [0.05, 0.95] produces the 5th–95th percentile spread."
+        ),
+    )
+    small_domain_threshold: int = Field(
+        default=10,
+        description=(
+            "Ensemble size below which min/max is used for the spread band instead of "
+            "quantiles.  Multi-domain calibration runs typically have 3–5 formulations "
+            "so min/max is more meaningful; full CONUS runs with 10+ formulations use "
+            "the configured quantiles."
+        ),
+    )
     @field_validator("quantiles")
     def validate_quantiles(cls, v):
+        """Ensure all quantile values are between 0 and 1."""
         if not all(0 <= q <= 1 for q in v):
             raise ValueError("Quantiles must be between 0 and 1.")
         return v
 
+
 class MetricsConfig(BaseModel):
     """Configuration for performance metrics and hypothesis testing."""
+
     enabled: bool = Field(
         default=False,
-        description="Whether to calculate performance metrics against observations."
+        description="Whether to calculate performance metrics against observations.",
     )
     variables: List[str] = Field(
         default=["nse", "kge", "pbias", "peak_flow_error"],
-        description="List of deterministic metrics to calculate (e.g., 'nse', 'kge', 'pbias', 'peak_flow_error')."
+        description=(
+            "List of deterministic metrics to calculate. "
+            "Options: 'nse', 'kge', 'pbias', 'peak_flow_error', 'peak_timing_error'."
+        ),
     )
     per_formulation: bool = Field(
         default=False,
-        description="Calculate metrics for each individual formulation in addition to the ensemble."
+        description=(
+            "If True, calculate metrics for each individual formulation in "
+            "addition to the ensemble mean."
+        ),
     )
     bootstrap_enabled: bool = Field(
         default=False,
-        description="Whether to perform bootstrapping to estimate confidence intervals."
+        description=(
+            "Whether to perform bootstrapping to estimate confidence intervals "
+            "and classify skill (skillful / unskillful / indeterminate)."
+        ),
     )
     bootstrap_samples: int = Field(
         default=1000,
-        description="Number of bootstrap iterations."
+        description="Number of bootstrap resampling iterations.",
     )
     confidence_level: float = Field(
         default=0.95,
-        description="Confidence level for the hypothesis test (e.g. 0.95 for 95% CI)."
+        description="Confidence level for the bootstrap hypothesis test (e.g. 0.95 = 95% CI).",
     )
-    metrics_output_file: Path = Field(
-        default=None,
-        description="Filename for saving calculated metrics. Saved in the output directory."
-    )
-    
+
+
 class HydrographConfig(BaseModel):
-    """Settings for Hydrograph plots."""
-    enabled: bool = Field(
-        default=True, 
-        description="Whether to generate hydrograph plots.")
+    """Settings for hydrograph time-series plots."""
+
+    enabled: bool = Field(default=True, description="Whether to generate hydrograph plots.")
     target_ids: List[int] = Field(
-        default=[], 
-        description="Specific Feature IDs to plot. If empty, the pipeline plots the first 5 found."
+        default=[],
+        description=(
+            "Specific Gage IDs to plot. If empty, plots all gages that have "
+            "matching observations."
+        ),
     )
     plot_uncertainty: bool = Field(
-        default=True, 
-        description="Include shaded uncertainty bands in the plot.")
+        default=True,
+        description="Include a shaded uncertainty band between the configured quantiles.",
+    )
     plot_members: bool = Field(
         default=False,
-        description="If True, plots each individual ensemble member trace in a light color (spaghetti plot)."
+        description=(
+            "If True, plot each individual ensemble member as a faint trace "
+            "(spaghetti plot style) instead of the uncertainty band."
+        ),
     )
 
-class StaticMapConfig(BaseModel):
-    """Settings for static map generation."""
-    enabled: bool = Field(True, description="Whether to generate static maps.")
-    variables: List[str] = Field(
-        default=["streamflow_mean"], 
-        description="List of variables to map (e.g., 'streamflow_mean', 'velocity_mean')."
-    )
-    basemap: bool = Field(True, description="Add a contextily background map (requires internet).")
 
-class MetricsMapConfig(BaseModel):
-    """Settings for mapping performance metrics across the domain."""
-    enabled: bool = Field(True, description="Whether to generate performance metric maps.")
-    variables: List[str] = Field(
-        default=["nse", "kge", "pbias"], 
-        description="List of performance metrics to map (e.g., 'nse', 'kge', 'pbias')."
+class SkillMapsConfig(BaseModel):
+    """
+    Post-processing skill assessment maps and charts.
+
+    These run after all domains are processed and require metrics.enabled=true.
+    Three output types per metric: winner scatter map, score boxplots, and
+    (optionally) a VPU regional breakdown stacked bar.
+    """
+
+    enabled: bool = Field(default=True, description="Master toggle for all skill map outputs.")
+    winner_maps: bool = Field(
+        default=True,
+        description="Scatter map of which model performed best at each gage.",
     )
-    basemap: bool = Field(True, description="Add a contextily background map (requires internet).")
-    
+    boxplots: bool = Field(
+        default=True,
+        description="Boxplot of score distributions across formulations.",
+    )
+    vpu_breakdown: bool = Field(
+        default=False,
+        description=(
+            "Stacked-bar win-rate by VPU. CONUS-scale only — requires a "
+            "hydrofabric GeoPackage with a 'flowpath-attributes' layer "
+            "containing a 'vpuid' column."
+        ),
+    )
+    variables: List[str] = Field(
+        default=["nse", "kge", "pbias"],
+        description="Metrics to produce skill maps and boxplots for.",
+    )
+    score_maps: bool = Field(
+        default=True,
+        description=(
+            "Generate a per-source scatter map for each metric — one PNG per "
+            "(metric, source) combination, coloured continuously by score value. "
+            "These replace the former metrics_maps outputs."
+        ),
+    )
+    basemap: bool = Field(
+        default=True,
+        description=(
+            "Add a CartoDB.Positron basemap to all spatial map outputs "
+            "(requires internet access)."
+        ),
+    )
+
+
 class InteractiveMapConfig(BaseModel):
-    """Settings for HTML interactive maps."""
-    enabled: bool = Field(True, description="Whether to generate an interactive Folium map.")
-    variable: str = Field("streamflow_mean", description="Variable to display on the interactive map.")
+    """Settings for the interactive HTML Folium map."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether to generate an interactive Folium map.",
+    )
+    variable: str = Field(
+        default="streamflow_mean",
+        description="Variable to display on the map.",
+    )
+
 
 class AnimationConfig(BaseModel):
-    """Settings for generating GIFs."""
-    enabled: bool = Field(False, description="Whether to generate an animation (time-intensive).")
-    variable: str = Field("streamflow_mean", description="Variable to animate.")
-    fps: int = Field(8, ge=1, le=60, description="Frames per second for the GIF.")
-    log_scale: bool = Field(True, description="Use logarithmic color scaling (recommended for streamflow).")
-    cmap: str = Field("hydro_flow", description="Colormap name (e.g., 'hydro_flow', 'viridis', 'coolwarm').")
-    time_step: str = Field("1W", description="Time slicing for the GIF (e.g. '1W' for 1 week).")
-    min_stream_order: int = Field(4, description="Minimum stream order for flowpaths to include.")
+    """Settings for generating GIF animations of flow through the network."""
 
-class PointMapConfig(BaseModel):
-    """Settings for domain-wide point maps."""
-    enabled: bool = Field(False, description="Generate static point maps from metrics.")
-    variables: List[str] = Field(
-        default=["nse", "sig_class"], 
-        description="Metrics to map (e.g. 'nse', 'kge', 'sig_class')."
+    enabled: bool = Field(
+        default=False,
+        description="Whether to generate a GIF animation (time-intensive for large domains).",
     )
-    marker_size: int = 15
+    variable: str = Field(default="streamflow_mean", description="Variable to animate.")
+    fps: int = Field(8, ge=1, le=60, description="Frames per second for the output GIF.")
+    log_scale: bool = Field(
+        default=True,
+        description="Use logarithmic color scaling (strongly recommended for streamflow).",
+    )
+    cmap: str = Field(
+        default="hydro_flow",
+        description="Colormap name ('hydro_flow', 'viridis', 'Blues', etc.).",
+    )
+    time_step: str = Field(
+        default="1W",
+        description=(
+            "Time step between animation frames. "
+            "Accepts offset aliases ('1W', '1D', '3D') or integer step counts."
+        ),
+    )
+    min_stream_order: int = Field(
+        default=4,
+        description=(
+            "Minimum Strahler stream order to include. Higher values reduce "
+            "the number of flowpaths and speed up rendering."
+        ),
+    )
+
 
 class VizConfig(BaseModel):
-    """Visualization grouping."""
+    """Visualization configuration grouping."""
+
     hydrographs: HydrographConfig = HydrographConfig()
-    static_maps: StaticMapConfig = StaticMapConfig()
+    skill_maps: SkillMapsConfig = SkillMapsConfig()
     interactive_map: InteractiveMapConfig = InteractiveMapConfig()
     animation: AnimationConfig = AnimationConfig()
-    metrics_maps: MetricsMapConfig = MetricsMapConfig()
 
-# Main Config Model 
+
 class TevalConfig(BaseModel):
     """Root configuration object for TEVAL."""
+
     io: IOConfig = IOConfig()
     system: SystemConfig = SystemConfig()
     data: DataConfig = DataConfig()
@@ -217,6 +372,7 @@ class TevalConfig(BaseModel):
 
     @classmethod
     def from_yaml(cls, path: Union[str, Path]) -> "TevalConfig":
+        """Load and validate a TevalConfig from a YAML file."""
         path = Path(path)
         if not path.exists():
             raise FileNotFoundError(f"Configuration file not found: {path}")
@@ -224,65 +380,44 @@ class TevalConfig(BaseModel):
             raw = yaml.safe_load(f)
         return cls(**raw)
 
-# Generators
+
 def generate_default_config(path: str = "teval_config.yaml"):
-    """
-    Generates a default YAML configuration file based on the Pydantic model defaults.
-    """
-    # Create an instance with default values
-    default_model = TevalConfig()
-    
-    # Convert to dict
-    default_dict = default_model.model_dump()
-    
-    # Helper to clean Path objects into strings for YAML serialization
+    """Generates a default YAML configuration file based on model defaults."""
+    default_dict = TevalConfig().model_dump()
+
     def clean_dict(d):
+        """Recursively remove None values from a nested dict."""
         for k, v in d.items():
             if isinstance(v, dict):
                 clean_dict(v)
             elif isinstance(v, Path):
                 d[k] = str(v)
-    
+
     clean_dict(default_dict)
-    
-    # Write to file
     with open(path, "w") as f:
         yaml.dump(default_dict, f, sort_keys=False, default_flow_style=False)
 
-def generate_config_help() -> str:
-    """
-    Introspects the TevalConfig model to generate a readable help guide.
-    """
-    lines = []
-    lines.append("TEVAL CONFIGURATION GUIDE")
-    lines.append("=" * 80)
-    lines.append("This guide explains all available configuration options for the teval_config.yaml file.\n")
 
-    # Iterate over the main sections (fields of TevalConfig)
+def generate_config_help() -> str:
+    """Introspects TevalConfig to generate a human-readable configuration guide."""
+    lines = [
+        "TEVAL CONFIGURATION GUIDE",
+        "=" * 80,
+        "This guide explains all configuration options for your teval_config.yaml.\n",
+    ]
     for section_name, field_info in TevalConfig.model_fields.items():
-        # Get the sub-model class (e.g., IOConfig)
         section_model = field_info.annotation
-        
         lines.append(f"SECTION: {section_name}")
         lines.append("-" * 40)
-        
-        # Check if it has a docstring
         if section_model.__doc__:
-             lines.append(f"{section_model.__doc__}\n")
-
-        # Iterate over fields in the sub-model
+            lines.append(f"{section_model.__doc__}\n")
         for key, prop in section_model.model_fields.items():
-            # Get default value
-            default_val = prop.default
-            
-            # Format description with wrapping
             desc = prop.description or "No description provided."
-            wrapped_desc = textwrap.fill(desc, width=70, initial_indent="    ", subsequent_indent="    ")
-
-            lines.append(f"  • {key} (Default: {default_val})")
-            lines.append(wrapped_desc)
+            wrapped = textwrap.fill(
+                desc, width=70, initial_indent="    ", subsequent_indent="    "
+            )
+            lines.append(f"  • {key} (Default: {prop.default})")
+            lines.append(wrapped)
             lines.append("")
-        
         lines.append("")
-
     return "\n".join(lines)

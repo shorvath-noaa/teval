@@ -1,3 +1,5 @@
+"""GIF animation of streamflow propagation through the river network."""
+
 import numpy as np
 import pandas as pd
 import contextily as cx
@@ -44,7 +46,7 @@ def _render_frame(i, t, current_vals, gdf_sorted, cmap, norm, dynamic_lw, temp_d
 
 
 def animate_network(gdf, stats_ds, output_path, var_name="streamflow_mean", fps=8, add_basemap=True, log_scale=True):
-    print("Generating animation...")
+    """Render a time-lapse GIF of streamflow across the river network."""
     da = stats_ds[var_name]
     
     # Force a compute here if it's lazy so the workers don't trigger simultaneous reads
@@ -82,13 +84,11 @@ def animate_network(gdf, stats_ds, output_path, var_name="streamflow_mean", fps=
     else:                          # Small Basin scale (<500km)
         dynamic_lw = 2.5
         
-    print(f"   Domain width: {dx_meters/1000:,.0f} km -> Setting linewidth to {dynamic_lw}")
     # ---------------------------------------------------------
 
     temp_dir = Path(tempfile.mkdtemp())
     total_frames = len(times)
     
-    print(f"   Rendering {total_frames} frames in parallel...")
     n_cores = max(1, multiprocessing.cpu_count() - 1)
     
     # Blast the frames to the CPU cores
@@ -102,7 +102,6 @@ def animate_network(gdf, stats_ds, output_path, var_name="streamflow_mean", fps=
     # Sort files to guarantee chronological order before stitching
     frame_files.sort()
 
-    print("   Stitching frames...")
     images = [Image.open(f) for f in frame_files]
     if images:
         images[0].save(

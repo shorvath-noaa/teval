@@ -1,3 +1,5 @@
+"""Bootstrap confidence intervals for deterministic skill metrics."""
+
 import numpy as np
 from typing import Callable, Dict
 

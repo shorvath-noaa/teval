@@ -1,3 +1,5 @@
+"""USGS NWIS streamflow data retrieval utilities."""
+
 
 import pandas as pd
 import dataretrieval.nwis as nwis
