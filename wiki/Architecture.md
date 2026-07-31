@@ -12,9 +12,12 @@ T-Route .nc files (one per formulation)
     │
     ├── workflow.load_domain_data()
     │     ├── io.hydrofabric.load_hydrofabric()
-    │     ├── io.observations.fetch_observations()
-    │     └── _process_formulation_files()
-    │           └── ensemble_methods.stats.build_stats()  [lazy Dask graph]
+    │     │     └── build_nexus_crosswalk()            [only when weighted]
+    │     ├── weights.read_weight_file()               [only when weighted]
+    │     ├── _process_formulation_files()
+    │     │     ├── weights.resolve_weights()          [only when weighted]
+    │     │     └── ensemble_methods.stats.build_stats()  [lazy Dask graph]
+    │     └── io.observations.fetch_observations()
     │
     ├── pipeline.compute_and_write()
     │     └── dask.compute() — single pass:
@@ -41,6 +44,7 @@ T-Route .nc files (one per formulation)
 | `workflow.py` | Data loading, metrics calculation, per-domain viz dispatch |
 | `io/` | File discovery, hydrofabric loading, observation loading |
 | `ensemble_methods/` | Lazy ensemble stat graph construction |
+| `weights/` | Weight file reading, validation and nexus-to-feature resolution, weighting provenance |
 | `metrics/` | NSE, KGE, PBIAS, significance testing |
 | `viz/` | All rendering functions |
 | `obs/` | USGS API observation retrieval |
@@ -53,6 +57,8 @@ T-Route .nc files (one per formulation)
 **Single dask.compute() pass** — The ensemble NC write and gage-subset extraction are fused into one `dask.compute()` call. This reads each chunk of T-Route data exactly once regardless of how many downstream operations need it.
 
 **Lazy graph construction** — `build_stats()` constructs a fully lazy Dask graph. No data is read from disk until `compute_and_write()` triggers it. Time slicing is applied to the lazy graph before compute, so only the requested period is ever read.
+
+**Weights validated before any compute** — `teval.weights.resolve` is a pure function of plain frames, dicts and sequences: it reads no file, opens no GeoPackage and touches no Dataset. Every weight rule *and* the coverage policy are therefore decided before a Dask graph exists, so a weight file that cannot be applied fails in the first seconds of a run rather than after a long compute. Reading the (provisional) file format is `teval.weights.reader`'s separate job, so a format change leaves the rules intact.
 
 **io/ separation** — File discovery, hydrofabric loading, and observation loading are isolated in `teval.io`. This makes each step independently testable and keeps `workflow.py` focused on compute logic.
 
