@@ -47,81 +47,19 @@ from teval.config import StatsConfig
 logger = logging.getLogger(__name__)
 
 
-def _require_matching_labels(
-    axis: str,
-    ds_labels: pd.Index,
-    weight_labels: pd.Index,
-) -> None:
-    """
-    Require a weight axis to carry exactly the dataset's labels, in any order.
-
-    Equality on both axes, not something looser on either.  xarray arithmetic
-    joins on the *intersection* of coordinates, so an array short of one label
-    would silently drop that row and the run would finish, writing a product
-    quietly short of rows; one carrying a label the run does not have was
-    resolved against some other dataset.  Neither has a reconciliation worth
-    guessing at, and both directions are reported together so an array wrong
-    in both takes one run to diagnose.
-    """
-    missing = ds_labels.difference(weight_labels)
-    unexpected = weight_labels.difference(ds_labels)
-    if not len(missing) and not len(unexpected):
-        return
-
-    problems = []
-    if len(missing):
-        problems.append(
-            f"weights omit {len(missing)} of the dataset's {len(ds_labels)}, "
-            f"e.g. {list(missing[:10])}"
-        )
-    if len(unexpected):
-        problems.append(
-            f"weights carry {len(unexpected)} label(s) the dataset does not, "
-            f"e.g. {list(unexpected[:10])}"
-        )
-    raise ValueError(
-        f"weights do not carry exactly the dataset's '{axis}' labels: "
-        + "; ".join(problems)
-        + ". resolve_weights builds both axes from the dataset it is resolved "
-        "against, so a mismatch means these weights are not this run's."
-    )
-
-
 def _align_weights(combined_ds: xr.Dataset, weights: xr.DataArray) -> xr.DataArray:
     """
-    Check a weight array against the dataset and select it onto the dataset's labels.
+    Require a weight array over exactly this run's labels, and select it onto them.
 
-    ``resolve_weights`` builds both of its coordinates from the very dataset
-    the weights are then applied to, so in a real run the two agree by
-    construction and the ``.sel`` below is a no-op.  What is asserted here is
-    that the producer did what it claims — a labelled array over exactly this
-    run's ``(feature_id, formulation)``, the only shape it produces — rather
-    than that mismatched inputs can be reconciled.  The selection is kept so
-    that matching stays by label and never by position: the ``formulation``
-    axis follows directory scan order, and a silent transposition there would
+    Each axis must match the dataset's labels exactly, in either direction,
+    because xarray arithmetic joins on the *intersection* of coordinates: an
+    array short of one label would silently drop that row and the run would
+    finish, writing a product quietly short of rows.  ``resolve_weights``
+    builds both coordinates from the very dataset the weights are applied to,
+    so in a real run they agree and the ``.sel`` is a no-op; it is kept so that
+    matching stays by label and never by position, since the ``formulation``
+    axis follows directory scan order and a silent transposition there would
     swap members.
-
-    Parameters
-    ----------
-    combined_ds:
-        The lazy ensemble dataset the weights will be applied to.
-    weights:
-        Weight array over ``(feature_id, formulation)``, as
-        ``teval.weights.resolve.resolve_weights`` returns it.
-
-    Returns
-    -------
-    xr.DataArray
-        *weights* selected onto the dataset's own coordinate labels, so the
-        subsequent reduction has nothing left to align.
-
-    Raises
-    ------
-    TypeError
-        *weights* is not an ``xr.DataArray``.
-    ValueError
-        *weights* omits either axis, the dataset does not label one of them,
-        or an axis does not carry exactly the dataset's labels.
     """
     if not isinstance(weights, xr.DataArray):
         raise TypeError(
@@ -144,7 +82,28 @@ def _align_weights(combined_ds: xr.Dataset, weights: xr.DataArray) -> xr.DataArr
                 f"before building weighted statistics."
             )
         ds_labels = pd.Index(combined_ds[axis].values)
-        _require_matching_labels(axis, ds_labels, pd.Index(weights[axis].values))
+        weight_labels = pd.Index(weights[axis].values)
+        missing = ds_labels.difference(weight_labels)
+        unexpected = weight_labels.difference(ds_labels)
+        if len(missing) or len(unexpected):
+            problems = []
+            if len(missing):
+                problems.append(
+                    f"weights omit {len(missing)} of the dataset's "
+                    f"{len(ds_labels)}, e.g. {list(missing[:10])}"
+                )
+            if len(unexpected):
+                problems.append(
+                    f"weights carry {len(unexpected)} label(s) the dataset "
+                    f"does not, e.g. {list(unexpected[:10])}"
+                )
+            raise ValueError(
+                f"weights do not carry exactly the dataset's '{axis}' labels: "
+                + "; ".join(problems)
+                + ". resolve_weights builds both axes from the dataset it is "
+                "resolved against, so a mismatch means these weights are not "
+                "this run's."
+            )
         selection[axis] = ds_labels.to_numpy()
 
     return weights.sel(selection)
