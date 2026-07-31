@@ -26,11 +26,9 @@ import geopandas as gpd
 import pandas as pd
 import numpy as np
 
-logger = logging.getLogger(__name__)
+from teval.identifiers import as_identifiers
 
-# Everything that is not a digit, stripped when reducing an identifier such as
-# "nex-9001" to the integer form load_hydrofabric stores.
-_NON_DIGITS = r"\D+"
+logger = logging.getLogger(__name__)
 
 
 def load_hydrofabric(
@@ -122,59 +120,6 @@ def load_hydrofabric(
     return gdf, gage_ids, gage_to_fids, gage_to_nexus
 
 
-def _as_identifiers(values: pd.Series, context: str) -> pd.Series:
-    """
-    Reduce an identifier column to the integer form the hydrofabric stores.
-
-    ``load_hydrofabric`` already strips non-digits from ``id`` and ``toid``, so
-    a frame that has been through it carries plain integers.  A frame built by
-    other means may still hold the prefixed strings (``nex-9001``), so both are
-    accepted and reduced identically — the two must not normalize differently
-    or a flowpath would be filed under the wrong nexus.
-
-    Numeric values are read as numbers first and only genuinely non-numeric
-    entries are digit-stripped, so a float ``9001.0`` sitting in an object
-    column cannot be read as ``90010`` by having its decimal point removed.
-
-    Returns
-    -------
-    pd.Series
-        Float series, positionally aligned with ``values``, carrying NA where
-        an identifier is missing or holds no digits at all.
-
-    Raises
-    ------
-    ValueError
-        The column is boolean, or carries a non-integral number that cannot be
-        a hydrofabric identifier.
-    """
-    if pd.api.types.is_bool_dtype(values):
-        raise ValueError(
-            f"The {context} column is boolean and cannot hold hydrofabric "
-            f"identifiers."
-        )
-
-    numeric = pd.to_numeric(values, errors="coerce")
-
-    # Whatever did not read as a number is a string identifier; strip it down
-    # to the digits it carries, exactly as load_hydrofabric does.
-    unparsed = numeric.isna() & pd.notna(values)
-    if unparsed.any():
-        digits = values[unparsed].astype(str).str.replace(_NON_DIGITS, "", regex=True)
-        numeric.loc[unparsed] = pd.to_numeric(
-            digits.where(digits != ""), errors="coerce"
-        )
-
-    fractional = numeric.notna() & (numeric % 1 != 0)
-    if fractional.any():
-        offenders = sorted(set(numeric[fractional].tolist()))[:10]
-        raise ValueError(
-            f"The {context} column carries non-integer value(s) {offenders}; "
-            f"hydrofabric identifiers are integers."
-        )
-    return numeric
-
-
 def build_nexus_crosswalk(
     gdf_hydro: Optional[gpd.GeoDataFrame],
 ) -> Dict[int, List[int]]:
@@ -196,6 +141,10 @@ def build_nexus_crosswalk(
     afterwards a nexus number and a flowpath id are indistinguishable by value
     and a mapping built from the wrong column would return silently wrong
     weights rather than fail.
+
+    Both columns are reduced by :func:`teval.identifiers.as_identifiers`, the
+    same reduction the resolver applies to the weight file's nexus ids, so the
+    two sides of that join cannot normalize differently.
 
     Parameters
     ----------
@@ -244,8 +193,10 @@ def build_nexus_crosswalk(
 
     # Both sides are pulled onto a fresh positional index so the id taken from
     # the frame's index and the toid taken from the column stay row-aligned.
-    features = _as_identifiers(pd.Series(gdf_hydro.index.to_numpy()), "flowpath id")
-    nexus = _as_identifiers(pd.Series(gdf_hydro["toid"].to_numpy()), "toid")
+    features = as_identifiers(
+        pd.Series(gdf_hydro.index.to_numpy()), "The flowpath id column"
+    )
+    nexus = as_identifiers(pd.Series(gdf_hydro["toid"].to_numpy()), "The toid column")
 
     if features.isna().any():
         raise ValueError(

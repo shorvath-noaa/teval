@@ -74,7 +74,6 @@ CoverageReport
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from typing import Iterable, List, Mapping, Sequence, Tuple
 
@@ -82,6 +81,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
+from teval.identifiers import as_identifiers
 from teval.weights.reader import REQUIRED_COLUMNS
 
 logger = logging.getLogger(__name__)
@@ -95,10 +95,6 @@ ON_MISSING_POLICIES = ("warn", "error")
 
 # How many offending nexus ids to name in an error message before truncating.
 _MAX_REPORTED = 10
-
-# Everything that is not a digit, stripped when reducing an identifier such as
-# "nex-9001" to the integer the hydrofabric's toid column carries.
-_NON_DIGITS = re.compile(r"\D+")
 
 
 def _describe(items) -> str:
@@ -495,29 +491,51 @@ class CoverageReport:
         )
 
 
-def _to_nexus_key(value, context: str) -> int:
+def _nexus_keys(values: Iterable, context: str) -> np.ndarray:
     """
-    Reduce a nexus identifier to the integer the hydrofabric's ``toid`` carries.
+    Reduce nexus identifiers to the integers the hydrofabric's ``toid`` carries.
 
     ``load_hydrofabric`` strips non-digits from ``toid``, so ``nex-9001``
-    becomes ``9001``.  Weight-file nexus ids keep their prefix.  Both sides of
-    the join are put through *this* function and no other, so they cannot
-    normalize differently — the hazard being that after stripping, a nexus id
-    and a flowpath id are indistinguishable by value, and a join against the
-    wrong column would return silently wrong weights rather than raise.
-    """
-    if isinstance(value, (bool, np.bool_)):
-        raise ValueError(f"{context} is not a nexus identifier: {value!r}.")
-    if isinstance(value, (int, np.integer)):
-        return int(value)
+    becomes ``9001``.  Weight-file nexus ids keep whatever spelling the file
+    used.  The reduction itself is
+    :func:`teval.identifiers.as_identifiers` — the same one
+    ``build_nexus_crosswalk`` applies to the hydrofabric — so the two sides of
+    the join cannot normalize differently.  The hazard being guarded is that
+    after stripping, a nexus id and a flowpath id are indistinguishable by
+    value, and a join against the wrong column would return silently wrong
+    weights rather than raise.
 
-    digits = _NON_DIGITS.sub("", str(value).strip())
-    if not digits:
+    Nothing here is guessed at.  An identifier that carries no digits, or that
+    is not integral, raises rather than being reduced to something plausible:
+    a misread id would match no nexus, and under the default ``on_missing``
+    policy that presents as a coverage shortfall — "your file did not cover
+    this domain" — when the truth is that the file was misparsed.
+    """
+    listed = list(values)
+    if not listed:
+        return np.empty(0, dtype=np.int64)
+
+    series = pd.Series(listed, dtype=object)
+
+    # Checked here rather than left to as_identifiers, which only sees a bool
+    # *dtype*: True is an int in Python and would otherwise key nexus 1.
+    booleans = [v for v in listed if isinstance(v, (bool, np.bool_))]
+    if booleans:
+        raise ValueError(
+            f"{context} is not a nexus identifier: "
+            f"{_describe([repr(v) for v in booleans])}."
+        )
+
+    reduced = as_identifiers(series, context)
+
+    unreadable = reduced.isna()
+    if unreadable.any():
         raise ValueError(
             f"{context} carries no digits and cannot be matched against the "
-            f"hydrofabric's integer nexus ids: {value!r}."
+            f"hydrofabric's integer nexus ids: "
+            f"{_describe([repr(v) for v in series[unreadable]])}."
         )
-    return int(digits)
+    return reduced.to_numpy(dtype=np.int64)
 
 
 def _as_feature_ids(values: Iterable, context: str) -> np.ndarray:
@@ -558,15 +576,17 @@ def _crosswalk_arrays(
         de-duplicated; a feature listed under two different nexuses is an
         error, since its weights would be ambiguous.
     """
+    nexus_values = list(nexus_to_features)
+    nexus_keys = _nexus_keys(nexus_values, "Crosswalk nexus key")
+
     features: List[int] = []
     keys: List[int] = []
-    for nexus, drained in nexus_to_features.items():
-        key = _to_nexus_key(nexus, "Crosswalk nexus key")
+    for nexus, key in zip(nexus_values, nexus_keys):
         drained_ids = _as_feature_ids(
-            drained, f"Crosswalk entry for nexus {nexus}"
+            nexus_to_features[nexus], f"Crosswalk entry for nexus {nexus}"
         )
         features.extend(int(f) for f in drained_ids)
-        keys.extend([key] * len(drained_ids))
+        keys.extend([int(key)] * len(drained_ids))
 
     if not features:
         return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
@@ -587,10 +607,7 @@ def _crosswalk_arrays(
 
 def _group_keys(groups: pd.DataFrame) -> np.ndarray:
     """Reduce the validated groups' nexus ids to integer keys, rejecting collisions."""
-    keys = np.array(
-        [_to_nexus_key(nexus, "Weight file nexus_id") for nexus in groups.index],
-        dtype=np.int64,
-    )
+    keys = _nexus_keys(groups.index, "Weight file nexus_id")
     duplicated = pd.Index(keys).duplicated()
     if duplicated.any():
         collided = sorted(

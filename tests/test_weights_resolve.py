@@ -638,6 +638,73 @@ def test_prefixed_and_integer_nexus_ids_match(
     assert report.covered_features == 3
 
 
+def test_float_spelled_nexus_ids_match_an_integer_crosswalk(
+    formulation_index_map, formulation_names, feature_ids
+):
+    """
+    ``9001.0`` is nexus 9001, not 90010.
+
+    This is the spelling the reader produces from a weight file whose
+    ``nexus_id`` column carries unprefixed ids and therefore lands as float
+    dtype: ``astype(str)`` writes ``"9001.0"``.  Reducing it by dropping
+    non-digits would swallow the decimal point and key a nexus that does not
+    exist, and under the default ``on_missing`` policy the run would finish
+    unweighted with nothing but a coverage warning.
+    """
+    frame = tidy(group_rows("9001.0", [0.5, 0.3, 0.2]))
+
+    resolved, report = resolve_weights(
+        frame,
+        formulation_index_map,
+        formulation_names,
+        {9001: [101, 102, 103]},
+        feature_ids,
+    )
+
+    assert resolved.sel(feature_id=101).values.tolist() == [0.5, 0.3, 0.2]
+    assert report.covered_features == 3
+
+
+def test_a_float_spelled_crosswalk_nexus_matches_the_weight_file(
+    formulation_index_map, formulation_names, feature_ids
+):
+    """The same reduction runs on the crosswalk side, so it too reads 9001.0."""
+    frame = tidy(group_rows("nex-9001", [0.5, 0.3, 0.2]))
+
+    resolved, report = resolve_weights(
+        frame,
+        formulation_index_map,
+        formulation_names,
+        {9001.0: [101, 102, 103]},
+        feature_ids,
+    )
+
+    assert resolved.sel(feature_id=101).values.tolist() == [0.5, 0.3, 0.2]
+    assert report.covered_features == 3
+
+
+def test_a_fractional_nexus_id_raises_rather_than_being_guessed_at(
+    formulation_index_map, formulation_names, crosswalk, feature_ids
+):
+    """
+    ``9001.5`` is not a nexus, and inventing one from its digits would hide that.
+
+    Reducing it to 90015 would leave every feature on the equal-weight
+    fallback, which reads as "the file did not cover this domain" rather than
+    as "the file is wrong".
+    """
+    frame = tidy(group_rows("9001.5", [0.5, 0.3, 0.2]))
+
+    with pytest.raises(ValueError, match="non-integer"):
+        resolve_weights(
+            frame,
+            formulation_index_map,
+            formulation_names,
+            crosswalk,
+            feature_ids,
+        )
+
+
 def test_colliding_nexus_ids_raise(
     formulation_index_map, formulation_names, crosswalk, feature_ids
 ):

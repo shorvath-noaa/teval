@@ -228,6 +228,50 @@ def test_every_flowpath_at_a_confluence_gets_its_nexus_weights(
     assert not np.allclose(by_feature[201], by_feature[101] + 30.0)
 
 
+@pytest.fixture
+def numeric_nexus_weight_file(tmp_path, weight_frame):
+    """
+    The same weights with the ``nexus_id`` column written unprefixed.
+
+    ``9001`` rather than ``nex-9001``, which is a perfectly ordinary way to
+    write the provisional format and which pandas reads back as a numeric
+    column.
+    """
+    frame = weight_frame.assign(
+        nexus_id=weight_frame["nexus_id"]
+        .str.replace("nex-", "", regex=False)
+        .astype(float)
+    )
+    path = tmp_path / "weights_numeric_nexus.csv"
+    frame.to_csv(path, index=False)
+    return path
+
+
+def test_a_numeric_nexus_id_column_still_reaches_the_mean(
+    raw_files, numeric_nexus_weight_file, formulation_index_map, hydrofabric, caplog,
+):
+    """
+    A weight file whose nexus ids land as floats must weight, not fall back.
+
+    The reader casts that column with ``astype(str)``, so the resolver sees
+    ``"9001.0"``.  Reducing it by dropping non-digits gives 90010, which
+    matches no nexus in the crosswalk; every feature would then take the
+    equal-weight fallback and the run would finish with a coverage warning
+    rather than an error, so the wrong answer would look like a wrong *file*.
+    Both halves are asserted: the weights applied, and nothing warned.
+    """
+    with caplog.at_level(logging.WARNING):
+        results = workflow.load_domain_data(
+            _domain(raw_files),
+            IOConfig(),
+            _weighted_config(numeric_nexus_weight_file, formulation_index_map),
+        )
+
+    ds_stats, got = _mean_of(results)
+    np.testing.assert_allclose(got, _expected_mean(WEIGHTED_MEMBER_PART, ds_stats))
+    assert "uncovered" not in caplog.text
+
+
 def test_build_stats_receives_the_resolved_weight_array(
     raw_files, weight_file, formulation_index_map, hydrofabric, monkeypatch,
 ):
