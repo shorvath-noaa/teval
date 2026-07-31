@@ -1,9 +1,10 @@
 """
 teval.weights.resolve
 
-Interpret a tidy weight frame: bind the file's integer formulation indices to
-the run's formulation names, enforce every rule a weight group must obey, and
-expand the per-nexus groups into a dense weight array over the run's features.
+Interpret a tidy weight frame: relabel the file's integer formulation indices
+to the run's formulation names, enforce every rule a weight group must obey,
+and expand the per-nexus groups into a dense weight array over the run's
+features.
 
 This module is a pure function of plain inputs — DataFrames, dicts and
 sequences.  It reads no file, opens no GeoPackage and touches no xarray
@@ -16,17 +17,22 @@ Because nothing here touches data, everything — validation *and* coverage —
 is decided before a Dask graph exists.  A weight file that cannot be applied
 therefore fails in the first second of a run rather than after a long compute.
 
+The file's ``formulation_index`` is a file-format detail and does not survive
+past the first step here: rows are relabelled to formulation names once, at
+the top of :func:`validate_weight_groups`, and every rule below is expressed
+and reported in name space, which is what a user reading an error message can
+act on.
+
 Rules enforced here
 -------------------
-Binding
-    ``formulation_index_map`` must be a bijection with the formulations
-    discovered in the run.  An index naming a formulation that is not in the
-    run, or a formulation in the run that no index names, is an error: the
-    first is a stale legend, the second would silently drop a member from the
-    product.
+Legend
+    ``formulation_index_map`` must name exactly the formulations discovered in
+    the run.  A name the map supplies that the run does not have is a stale
+    legend; a formulation in the run that the map does not name would silently
+    drop a member from the product.  One set comparison decides both.
 Group completeness
-    A nexus with any rows at all must carry exactly one row per configured
-    index.  A missing row would drop one member at one location; a duplicate
+    A nexus with any rows at all must carry exactly one row per formulation in
+    the run.  A missing row would drop one member at one location; a duplicate
     row is the signature of two weight files concatenated by accident.  Both
     are hard errors and neither is configurable.  A nexus with *no* rows is
     not an error here — that is coverage, governed by ``on_missing``.
@@ -59,8 +65,6 @@ configured) and logs the counts and the coverage fraction; ``error`` aborts.
 
 Public API
 ----------
-bind_formulation_indices(formulation_index_map, formulations)
-    Return the weight-file index for each formulation, in run order.
 validate_weight_groups(weights, formulation_index_map, formulations, ...)
     Return validated per-nexus weight groups as a wide frame whose rows sum
     to 1 and whose columns are the formulations in run order.
@@ -105,53 +109,30 @@ def _describe(items) -> str:
     return f"{text} (and {remaining} more)" if remaining else text or "(none)"
 
 
-def bind_formulation_indices(
+def _require_legend_matches_run(
     formulation_index_map: Mapping[int, str],
     formulations: Sequence[str],
-) -> List[int]:
+) -> None:
     """
-    Bind the weight file's integer indices to the run's formulation names.
+    Require the legend to name exactly the formulations the run discovered.
+
+    One set comparison decides it, in both directions and reported together, so
+    a legend wrong in both takes one run to diagnose.  A name the map supplies
+    that the run does not have is a stale legend; a formulation in the run that
+    the map does not name would silently drop a member from the product.  An
+    empty map, or one that spends two indices on the same name and so leaves
+    another formulation unnamed, fails here as an unmapped formulation.
 
     The ``formulation`` dimension of the combined dataset follows directory
-    scan order, which is arbitrary and not stable across machines, so an index
-    cannot be read positionally.  The binding is therefore explicit, and it
-    must be a bijection: exactly the formulations discovered in the run, each
-    named exactly once.
-
-    Parameters
-    ----------
-    formulation_index_map:
-        Mapping from the 1-based ``formulation_index`` used in the weight file
-        to the formulation name teval parsed from the run directories.
-    formulations:
-        The formulation names discovered in the run, in dataset order.
-
-    Returns
-    -------
-    list of int
-        The weight-file index of each formulation, positionally aligned with
-        ``formulations``, so the result can order a weight array to match the
-        dataset's ``formulation`` dimension.
-
-    Raises
-    ------
-    ValueError
-        The map or the formulation list is empty or carries a duplicate, the
-        map names a formulation absent from the run, or a formulation in the
-        run is absent from the map.
+    scan order, which is arbitrary and not stable across machines, which is why
+    the legend is explicit rather than positional in the first place.
     """
-    if not formulation_index_map:
-        raise ValueError(
-            "formulation_index_map is empty; it must bind every formulation "
-            "in the run to the index the weight file uses for it."
-        )
-    if not formulations:
-        raise ValueError(
-            "No formulations were supplied to bind weights against; the run "
-            "must carry at least one formulation."
-        )
-
     run_names = list(formulations)
+    if not run_names:
+        raise ValueError(
+            "No formulations were supplied to weight against; the run must "
+            "carry at least one formulation."
+        )
     repeated_in_run = sorted({n for n in run_names if run_names.count(n) > 1})
     if repeated_in_run:
         raise ValueError(
@@ -159,38 +140,28 @@ def bind_formulation_indices(
             f"{_describe(repeated_in_run)}."
         )
 
-    mapped_names = list(formulation_index_map.values())
-    repeated_in_map = sorted({n for n in mapped_names if mapped_names.count(n) > 1})
-    if repeated_in_map:
-        raise ValueError(
-            f"formulation_index_map must name each formulation at most once; "
-            f"duplicated: {_describe(repeated_in_map)}."
-        )
+    mapped_names = set(formulation_index_map.values())
+    if mapped_names == set(run_names):
+        return
 
-    # Both directions of the bijection are checked, and reported together, so
-    # a legend that is wrong in both directions takes one run to diagnose.
-    unknown = sorted(set(mapped_names) - set(run_names))
-    unmapped = sorted(set(run_names) - set(mapped_names))
-    if unknown or unmapped:
-        problems = []
-        if unknown:
-            problems.append(
-                f"formulation_index_map names formulation(s) not present in "
-                f"the run: {_describe(unknown)}"
-            )
-        if unmapped:
-            problems.append(
-                f"formulation(s) present in the run are missing from "
-                f"formulation_index_map: {_describe(unmapped)}"
-            )
-        raise ValueError(
-            f"{'; '.join(problems)}. The run's formulations are "
-            f"{_describe(run_names)} and the map names {_describe(sorted(mapped_names))}. "
-            f"Weighting requires the two to match exactly."
+    problems = []
+    unknown = sorted(mapped_names - set(run_names))
+    if unknown:
+        problems.append(
+            f"formulation_index_map names formulation(s) not present in "
+            f"the run: {_describe(unknown)}"
         )
-
-    index_by_name = {name: int(index) for index, name in formulation_index_map.items()}
-    return [index_by_name[name] for name in run_names]
+    unmapped = sorted(set(run_names) - mapped_names)
+    if unmapped:
+        problems.append(
+            f"formulation(s) present in the run are missing from "
+            f"formulation_index_map: {_describe(unmapped)}"
+        )
+    raise ValueError(
+        f"{'; '.join(problems)}. The run's formulations are "
+        f"{_describe(run_names)} and the map names {_describe(sorted(mapped_names))}. "
+        f"Weighting requires the two to match exactly."
+    )
 
 
 def _as_tidy_frame(weights: pd.DataFrame) -> pd.DataFrame:
@@ -225,57 +196,71 @@ def _as_tidy_frame(weights: pd.DataFrame) -> pd.DataFrame:
         ) from exc
 
 
-def _require_known_indices(tidy: pd.DataFrame, indices: Sequence[int]) -> None:
-    """Raise if the file uses an index the legend does not define."""
-    unknown = sorted(set(tidy["formulation_index"]) - set(indices))
-    if unknown:
-        offenders = tidy.loc[tidy["formulation_index"].isin(unknown), "nexus_id"]
+def _relabel(
+    tidy: pd.DataFrame,
+    formulation_index_map: Mapping[int, str],
+) -> pd.DataFrame:
+    """
+    Replace the file's integer indices with formulation names, once.
+
+    This is the only place the ``formulation_index`` is understood.  Past it
+    every rule, every pivot and every error message works in name space, so
+    nothing downstream has to explain the legend to whoever reads the message.
+
+    An index the legend does not define is an error rather than a dropped row:
+    the file supplied a weight for a member and teval would otherwise ignore
+    it, leaving the group both silently incomplete and silently renormalized.
+    """
+    by_index = {int(index): name for index, name in formulation_index_map.items()}
+    named = tidy["formulation_index"].map(by_index)
+
+    unknown = tidy.loc[named.isna()]
+    if not unknown.empty:
         raise ValueError(
             f"Weight file uses formulation_index value(s) "
-            f"{_describe(unknown)} that formulation_index_map does not "
-            f"define (it defines {_describe(sorted(indices))}), at nexus "
-            f"{_describe(sorted(set(offenders)))}."
+            f"{_describe(sorted(set(unknown['formulation_index'])))} that "
+            f"formulation_index_map does not define (it defines "
+            f"{_describe(sorted(by_index))}), at nexus "
+            f"{_describe(sorted(set(unknown['nexus_id'])))}."
         )
+    return tidy.assign(formulation=named).drop(columns="formulation_index")
 
 
-def _require_complete_groups(tidy: pd.DataFrame, indices: Sequence[int]) -> None:
+def _require_complete_groups(tidy: pd.DataFrame, formulations: Sequence[str]) -> None:
     """
-    Raise unless every nexus present carries exactly one row per index.
+    Raise unless every nexus present carries exactly one row per formulation.
 
     A missing row would drop one formulation from the combination at that
     location; a duplicate row makes the group ambiguous.  Both are reported
-    with the nexus ids and the indices at fault.
+    with the nexus ids and the formulations at fault.
     """
-    expected = set(indices)
+    expected = set(formulations)
 
-    duplicated = tidy[tidy.duplicated(subset=["nexus_id", "formulation_index"])]
+    duplicated = tidy[tidy.duplicated(subset=["nexus_id", "formulation"])]
     if not duplicated.empty:
         pairs = sorted(
-            {
-                (row.nexus_id, int(row.formulation_index))
-                for row in duplicated.itertuples()
-            }
+            {(row.nexus_id, row.formulation) for row in duplicated.itertuples()}
         )
         raise ValueError(
             f"Weight file has duplicate rows for "
-            f"{_describe([f'{nexus} index {index}' for nexus, index in pairs])}. "
-            f"Each nexus must carry exactly one row per formulation index; "
+            f"{_describe([f'{nexus} formulation {name}' for nexus, name in pairs])}. "
+            f"Each nexus must carry exactly one row per formulation; "
             f"duplicates usually mean two weight files were concatenated."
         )
 
     incomplete = []
     for nexus_id, group in tidy.groupby("nexus_id", sort=False):
-        missing = sorted(expected - set(group["formulation_index"]))
+        missing = sorted(expected - set(group["formulation"]))
         if missing:
-            incomplete.append(f"{nexus_id} missing index/indices {missing}")
+            incomplete.append(f"{nexus_id} missing {', '.join(missing)}")
     if incomplete:
         raise ValueError(
             f"Weight file has incomplete weight group(s): "
             f"{_describe(incomplete)}. A nexus present in the file must carry "
-            f"a weight for every formulation index in formulation_index_map "
-            f"({sorted(expected)}), so no member can silently drop out at one "
-            f"location. A nexus with no rows at all is allowed and is handled "
-            f"by the coverage policy."
+            f"a weight for every formulation in the run "
+            f"({_describe(sorted(expected))}), so no member can silently drop "
+            f"out at one location. A nexus with no rows at all is allowed and "
+            f"is handled by the coverage policy."
         )
 
 
@@ -301,22 +286,17 @@ def _require_valid_weight_values(tidy: pd.DataFrame) -> None:
         )
 
 
-def _to_wide(
-    tidy: pd.DataFrame,
-    indices: Sequence[int],
-    formulations: Sequence[str],
-) -> pd.DataFrame:
+def _to_wide(tidy: pd.DataFrame, formulations: Sequence[str]) -> pd.DataFrame:
     """
     Pivot validated rows into one row per nexus, columns in run order.
 
     Completeness and duplication have already been checked, so the pivot is
-    guaranteed dense and unambiguous.
+    guaranteed dense and unambiguous, and selecting ``formulations`` from it
+    both orders the columns to match the dataset and cannot drop a column.
     """
     order = tidy["nexus_id"].drop_duplicates().tolist()
-    wide = tidy.pivot(index="nexus_id", columns="formulation_index", values="weight")
-    wide = wide.loc[order, list(indices)]
-    wide.columns = pd.Index(list(formulations), name="formulation")
-    return wide.astype(float)
+    wide = tidy.pivot(index="nexus_id", columns="formulation", values="weight")
+    return wide.loc[order, list(formulations)].astype(float)
 
 
 def _apply_sum_rule(
@@ -369,7 +349,7 @@ def validate_weight_groups(
     tolerance: float = SUM_TOLERANCE,
 ) -> pd.DataFrame:
     """
-    Bind, validate and normalize the weight groups in a tidy weight frame.
+    Relabel, validate and normalize the weight groups in a tidy weight frame.
 
     Pure: plain frames and dicts in, a plain frame out.  No file is read and
     no dataset is touched, so this runs before any Dask graph is built and a
@@ -381,7 +361,7 @@ def validate_weight_groups(
         Tidy weight frame with ``nexus_id``, ``formulation_index`` and
         ``weight`` columns, as ``read_weight_file`` returns it.
     formulation_index_map:
-        Binding from weight-file index to formulation name.
+        Legend from weight-file index to formulation name.
     formulations:
         The formulation names discovered in the run, in dataset order.  The
         returned columns follow this order.
@@ -405,13 +385,13 @@ def validate_weight_groups(
     Raises
     ------
     ValueError
-        The index map is not a bijection with the run's formulations, the
-        frame is missing a schema column or carries values of the wrong type,
-        a group is incomplete or duplicated, a weight is negative or
-        non-finite, a group is entirely zero, or a group does not sum to 1
-        and ``normalize`` is False.
+        The index map does not name exactly the run's formulations, the frame
+        is missing a schema column or carries values of the wrong type, a row
+        uses an index the map does not define, a group is incomplete or
+        duplicated, a weight is negative or non-finite, a group is entirely
+        zero, or a group does not sum to 1 and ``normalize`` is False.
     """
-    indices = bind_formulation_indices(formulation_index_map, formulations)
+    _require_legend_matches_run(formulation_index_map, formulations)
     tidy = _as_tidy_frame(weights)
 
     if tidy.empty:
@@ -424,11 +404,11 @@ def validate_weight_groups(
             dtype=float,
         )
 
-    _require_known_indices(tidy, indices)
-    _require_complete_groups(tidy, indices)
-    _require_valid_weight_values(tidy)
+    named = _relabel(tidy, formulation_index_map)
+    _require_complete_groups(named, formulations)
+    _require_valid_weight_values(named)
 
-    wide = _to_wide(tidy, indices, formulations)
+    wide = _to_wide(named, formulations)
     wide = _apply_sum_rule(wide, normalize=normalize, tolerance=tolerance)
 
     logger.debug(

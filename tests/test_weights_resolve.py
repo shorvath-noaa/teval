@@ -1,9 +1,9 @@
 """
 Tests for ``teval.weights.resolve``.
 
-The resolver owns the *meaning* of a weight file: the legend binding, every
-rule a weight group must obey, the expansion of per-nexus groups onto the
-run's features, and the coverage policy.  The reader's job (schema, dtypes,
+The resolver owns the *meaning* of a weight file: the legend, every rule a
+weight group must obey, the expansion of per-nexus groups onto the run's
+features, and the coverage policy.  The reader's job (schema, dtypes,
 raising on unreadable input) is tested separately in
 ``test_weights_reader.py``; nothing here reads a file.
 
@@ -28,7 +28,6 @@ import xarray as xr
 
 from teval.weights import (
     CoverageReport,
-    bind_formulation_indices,
     resolve_weights,
     validate_weight_groups,
 )
@@ -75,91 +74,96 @@ def one_nexus_crosswalk():
 
 
 # --------------------------------------------------------------------- #
-# Legend binding — both directions of mismatch                          #
+# The legend — one set comparison, both directions of mismatch          #
 # --------------------------------------------------------------------- #
-def test_binding_returns_indices_in_run_order(
-    formulation_index_map, formulation_names
-):
-    """The result is positionally aligned with the run's formulation order."""
-    assert bind_formulation_indices(formulation_index_map, formulation_names) == [
-        1,
-        2,
-        3,
-    ]
+# The index is a file-format detail: it is relabelled to a formulation name
+# once, at the top of validate_weight_groups, and is never an output.  So the
+# legend is asserted through the public boundary, on the groups it produces
+# and the errors it raises, rather than on a binding function.
+def test_non_contiguous_indices_are_accepted():
+    """Indices need only be defined by the legend, not consecutive."""
+    frame = tidy([("nex-9001", 4, 0.6), ("nex-9001", 9, 0.4)])
+
+    groups = validate_weight_groups(
+        frame, {4: "formA", 9: "formB"}, ["formB", "formA"]
+    )
+
+    assert list(groups.columns) == ["formB", "formA"]
+    assert groups.loc["nex-9001"].tolist() == [0.4, 0.6]
 
 
-def test_binding_tracks_a_reordered_run(formulation_index_map):
-    """A run that discovers formulations in another order rebinds, not re-maps."""
-    assert bind_formulation_indices(
-        formulation_index_map, ["formC", "formA", "formB"]
-    ) == [3, 1, 2]
-
-
-def test_binding_accepts_non_contiguous_indices():
-    """Indices need only be unique and 1-based, not consecutive."""
-    assert bind_formulation_indices({4: "a", 9: "b"}, ["b", "a"]) == [9, 4]
-
-
-def test_map_naming_an_absent_formulation_raises(formulation_names):
+def test_map_naming_an_absent_formulation_raises(weight_frame, formulation_names):
     """A legend naming a formulation the run does not have is stale."""
     stale = {1: "formA", 2: "formB", 3: "formC", 4: "formD"}
 
     with pytest.raises(ValueError, match="not present in the run"):
-        bind_formulation_indices(stale, formulation_names)
+        validate_weight_groups(weight_frame, stale, formulation_names)
 
 
-def test_formulation_missing_from_map_raises(formulation_names):
+def test_formulation_missing_from_map_raises(weight_frame, formulation_names):
     """A discovered formulation no index names would silently drop out."""
     partial = {1: "formA", 2: "formB"}
 
     with pytest.raises(ValueError, match="missing from formulation_index_map"):
-        bind_formulation_indices(partial, formulation_names)
+        validate_weight_groups(weight_frame, partial, formulation_names)
 
 
-def test_both_directions_of_mismatch_reported_together(formulation_names):
+def test_both_directions_of_mismatch_reported_together(
+    weight_frame, formulation_names
+):
     """A legend wrong in both directions takes one run to diagnose, not two."""
     wrong = {1: "formA", 2: "formB", 3: "formZ"}
 
     with pytest.raises(ValueError) as excinfo:
-        bind_formulation_indices(wrong, formulation_names)
+        validate_weight_groups(weight_frame, wrong, formulation_names)
 
     message = str(excinfo.value)
     assert "formZ" in message and "not present in the run" in message
     assert "formC" in message and "missing from formulation_index_map" in message
 
 
-def test_empty_map_raises(formulation_names):
-    """An empty legend cannot bind anything."""
-    with pytest.raises(ValueError, match="formulation_index_map is empty"):
-        bind_formulation_indices({}, formulation_names)
+def test_empty_map_raises(weight_frame, formulation_names):
+    """An empty legend names none of the run's formulations."""
+    with pytest.raises(ValueError, match="missing from formulation_index_map"):
+        validate_weight_groups(weight_frame, {}, formulation_names)
 
 
-def test_empty_formulation_list_raises(formulation_index_map):
-    """There must be something to bind against."""
+def test_empty_formulation_list_raises(weight_frame, formulation_index_map):
+    """There must be something to weight."""
     with pytest.raises(ValueError, match="at least one formulation"):
-        bind_formulation_indices(formulation_index_map, [])
+        validate_weight_groups(weight_frame, formulation_index_map, [])
 
 
-def test_map_naming_one_formulation_twice_raises(formulation_names):
-    """Two indices for one formulation make the binding ambiguous."""
-    with pytest.raises(ValueError, match="at most once"):
-        bind_formulation_indices(
-            {1: "formA", 2: "formA", 3: "formC"}, formulation_names
+def test_map_naming_one_formulation_twice_raises(weight_frame, formulation_names):
+    """Two indices spent on one name leave another formulation unnamed."""
+    with pytest.raises(ValueError, match="missing from formulation_index_map") as exc:
+        validate_weight_groups(
+            weight_frame, {1: "formA", 2: "formA", 3: "formC"}, formulation_names
         )
 
+    assert "formB" in str(exc.value)
 
-def test_repeated_run_formulation_raises(formulation_index_map):
-    """A repeated formulation in the run is rejected by the pure function too."""
+
+def test_repeated_run_formulation_raises(weight_frame, formulation_index_map):
+    """A repeated formulation in the run makes the run's own order ambiguous."""
     with pytest.raises(ValueError, match="must be unique"):
-        bind_formulation_indices(
-            formulation_index_map, ["formA", "formA", "formB", "formC"]
+        validate_weight_groups(
+            weight_frame, formulation_index_map, ["formA", "formA", "formB", "formC"]
         )
+
+
+def test_the_legend_is_checked_before_the_frame(formulation_names):
+    """A stale legend is reported even when the frame is unreadable too."""
+    malformed = tidy([("nex-9001", 1, 0.5)]).drop(columns=["weight"])
+
+    with pytest.raises(ValueError, match="missing from formulation_index_map"):
+        validate_weight_groups(malformed, {1: "formA"}, formulation_names)
 
 
 def test_legend_mismatch_propagates_through_resolve(
     weight_frame, formulation_names, crosswalk, feature_ids
 ):
-    """Binding runs first, so a stale legend fails before any other rule."""
+    """The legend is checked first, so a stale one fails before any other rule."""
     with pytest.raises(ValueError, match="missing from formulation_index_map"):
         resolve_weights(
             weight_frame,
@@ -261,7 +265,7 @@ def test_uncoercible_column_raises(formulation_index_map, formulation_names):
 # Completeness — a missing row and a duplicate row each raise            #
 # --------------------------------------------------------------------- #
 def test_missing_row_raises(formulation_index_map, formulation_names):
-    """A nexus present in the file must carry every configured index."""
+    """A nexus present in the file must carry every formulation in the run."""
     frame = tidy(
         group_rows("nex-9001", [0.5, 0.3, 0.2])
         + [("nex-9002", 1, 0.4), ("nex-9002", 2, 0.6)]
@@ -272,7 +276,9 @@ def test_missing_row_raises(formulation_index_map, formulation_names):
 
     message = str(excinfo.value)
     assert "incomplete weight group" in message
-    assert "nex-9002" in message and "3" in message
+    # The member that dropped out is named, not the index the file spelled it
+    # with: the reader of the message has the formulation names, not the legend.
+    assert "nex-9002" in message and "formC" in message
     assert "nex-9001" not in message.split(".")[0]
 
 
@@ -285,7 +291,7 @@ def test_duplicate_row_raises(formulation_index_map, formulation_names):
 
     message = str(excinfo.value)
     assert "duplicate rows" in message
-    assert "nex-9001 index 2" in message
+    assert "nex-9001 formulation formB" in message
 
 
 def test_duplicate_row_raises_even_when_values_agree(
