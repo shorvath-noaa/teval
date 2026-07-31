@@ -2,7 +2,8 @@
 teval.weights.resolve
 
 Interpret a tidy weight frame: bind the file's integer formulation indices to
-the run's formulation names, and enforce every rule a weight group must obey.
+the run's formulation names, enforce every rule a weight group must obey, and
+expand the per-nexus groups into a dense weight array over the run's features.
 
 This module is a pure function of plain inputs — DataFrames, dicts and
 sequences.  It reads no file, opens no GeoPackage and touches no xarray
@@ -10,6 +11,10 @@ Dataset, so every rule below is testable without any of them.  Reading the
 file is ``teval.weights.reader``'s job; that module owns the provisional file
 format and this one owns the meaning, so a format change leaves these rules
 intact.
+
+Because nothing here touches data, everything — validation *and* coverage —
+is decided before a Dask graph exists.  A weight file that cannot be applied
+therefore fails in the first second of a run rather than after a long compute.
 
 Rules enforced here
 -------------------
@@ -41,6 +46,17 @@ Sums
 Every failure raises ``ValueError`` naming the offending nexus ids, so a bad
 file is diagnosable from the message without reading the source.
 
+Expansion and coverage
+----------------------
+Weights are keyed by nexus; the ensemble dataset is indexed by ``feature_id``.
+The relationship is many-to-one — several flowpaths may converge on one nexus
+— so a nexus' group broadcasts unchanged to every feature draining to it.
+
+A feature whose nexus carries no weights is *uncovered*, and ``on_missing``
+decides what that means: ``warn`` gives it equal weights (which is exactly the
+simple mean, so an uncovered feature behaves as it did before weighting was
+configured) and logs the counts and the coverage fraction; ``error`` aborts.
+
 Public API
 ----------
 bind_formulation_indices(formulation_index_map, formulations)
@@ -48,15 +64,23 @@ bind_formulation_indices(formulation_index_map, formulations)
 validate_weight_groups(weights, formulation_index_map, formulations, ...)
     Return validated per-nexus weight groups as a wide frame whose rows sum
     to 1 and whose columns are the formulations in run order.
+resolve_weights(weights, formulation_index_map, formulations, ...)
+    Validate, expand and fill in one call: return a dense weight array over
+    (feature_id, formulation) together with a CoverageReport.
+CoverageReport
+    Counts and the coverage fraction achieved by a resolution.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import List, Mapping, Sequence
+import re
+from dataclasses import dataclass
+from typing import Iterable, List, Mapping, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+import xarray as xr
 
 from teval.weights.reader import REQUIRED_COLUMNS
 
@@ -66,8 +90,15 @@ logger = logging.getLogger(__name__)
 #: that 0.5 + 0.3 + 0.2 passes, narrow enough that a real error does not.
 SUM_TOLERANCE = 1e-6
 
+#: Accepted values of ``stats.weights.on_missing``.
+ON_MISSING_POLICIES = ("warn", "error")
+
 # How many offending nexus ids to name in an error message before truncating.
 _MAX_REPORTED = 10
+
+# Everything that is not a digit, stripped when reducing an identifier such as
+# "nex-9001" to the integer the hydrofabric's toid column carries.
+_NON_DIGITS = re.compile(r"\D+")
 
 
 def _describe(items) -> str:
@@ -409,3 +440,357 @@ def validate_weight_groups(
         f"{len(formulations)} formulation(s)."
     )
     return wide
+
+
+# --------------------------------------------------------------------- #
+# Nexus to feature expansion, coverage policy and reporting             #
+# --------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class CoverageReport:
+    """
+    What a resolution achieved: how much of the run the weight file covered.
+
+    Attributes
+    ----------
+    total_features:
+        Features in the run — the length of the returned weight array's
+        ``feature_id`` dimension.
+    covered_features:
+        Features that drain to a nexus present in the weight file, and so
+        carry weights the file supplied.
+    uncovered_features:
+        Features left on equal weights because their nexus is absent from the
+        weight file, or because they drain to no nexus in the crosswalk.
+    fraction:
+        ``covered_features / total_features``, in ``[0, 1]``.  This is the
+        value written to the output NetCDF as provenance.
+    used_nexus:
+        Weight groups in the file that reached at least one feature.
+    unused_nexus:
+        Weight groups in the file that reached no feature in this run — the
+        normal case when one national weight file is applied to one domain,
+        but a large count alongside low coverage points at a wrong crosswalk.
+    """
+
+    total_features: int
+    covered_features: int
+    uncovered_features: int
+    fraction: float
+    used_nexus: int
+    unused_nexus: int
+
+    @property
+    def is_complete(self) -> bool:
+        """True when every feature in the run carries supplied weights."""
+        return self.uncovered_features == 0
+
+    def summary(self) -> str:
+        """One-line description, used for the log line and for provenance."""
+        return (
+            f"weight coverage {self.fraction:.1%} "
+            f"({self.covered_features} of {self.total_features} feature(s) "
+            f"covered, {self.uncovered_features} uncovered) from "
+            f"{self.used_nexus} applied nexus weight group(s)"
+            + (f", {self.unused_nexus} unused" if self.unused_nexus else "")
+        )
+
+
+def _to_nexus_key(value, context: str) -> int:
+    """
+    Reduce a nexus identifier to the integer the hydrofabric's ``toid`` carries.
+
+    ``load_hydrofabric`` strips non-digits from ``toid``, so ``nex-9001``
+    becomes ``9001``.  Weight-file nexus ids keep their prefix.  Both sides of
+    the join are put through *this* function and no other, so they cannot
+    normalize differently — the hazard being that after stripping, a nexus id
+    and a flowpath id are indistinguishable by value, and a join against the
+    wrong column would return silently wrong weights rather than raise.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{context} is not a nexus identifier: {value!r}.")
+    if isinstance(value, (int, np.integer)):
+        return int(value)
+
+    digits = _NON_DIGITS.sub("", str(value).strip())
+    if not digits:
+        raise ValueError(
+            f"{context} carries no digits and cannot be matched against the "
+            f"hydrofabric's integer nexus ids: {value!r}."
+        )
+    return int(digits)
+
+
+def _as_feature_ids(values: Iterable, context: str) -> np.ndarray:
+    """
+    Return feature identifiers as a plain int64 array.
+
+    The dtype is forced rather than trusted: an int64 array of feature ids
+    compared against a float or object array of the same numbers matches
+    nothing, which would read as "no coverage" instead of as a type mismatch.
+    """
+    array = np.asarray(list(values))
+    if array.size == 0:
+        return np.empty(0, dtype=np.int64)
+    try:
+        as_int = array.astype(np.int64)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{context} must be integer feature ids: {exc}") from exc
+
+    if not np.array_equal(as_int.astype(array.dtype, copy=False), array):
+        raise ValueError(
+            f"{context} must be integer feature ids; some values are not "
+            f"integral."
+        )
+    return as_int
+
+
+def _crosswalk_arrays(
+    nexus_to_features: Mapping,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Flatten the nexus-to-features mapping into aligned feature and nexus arrays.
+
+    Returns
+    -------
+    (feature_ids, nexus_keys)
+        One entry per (feature, nexus) pair, with nexus ids reduced to integer
+        keys.  A feature listed twice under the same nexus is harmless and is
+        de-duplicated; a feature listed under two different nexuses is an
+        error, since its weights would be ambiguous.
+    """
+    features: List[int] = []
+    keys: List[int] = []
+    for nexus, drained in nexus_to_features.items():
+        key = _to_nexus_key(nexus, "Crosswalk nexus key")
+        drained_ids = _as_feature_ids(
+            drained, f"Crosswalk entry for nexus {nexus}"
+        )
+        features.extend(int(f) for f in drained_ids)
+        keys.extend([key] * len(drained_ids))
+
+    if not features:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+
+    pairs = pd.DataFrame({"feature_id": features, "nexus_key": keys}).drop_duplicates()
+    conflicted = pairs.loc[pairs["feature_id"].duplicated(keep=False), "feature_id"]
+    if not conflicted.empty:
+        raise ValueError(
+            f"Crosswalk assigns feature(s) {_describe(sorted(set(conflicted)))} "
+            f"to more than one nexus, so their weights would be ambiguous. A "
+            f"flowpath drains to exactly one nexus."
+        )
+    return (
+        pairs["feature_id"].to_numpy(dtype=np.int64),
+        pairs["nexus_key"].to_numpy(dtype=np.int64),
+    )
+
+
+def _group_keys(groups: pd.DataFrame) -> np.ndarray:
+    """Reduce the validated groups' nexus ids to integer keys, rejecting collisions."""
+    keys = np.array(
+        [_to_nexus_key(nexus, "Weight file nexus_id") for nexus in groups.index],
+        dtype=np.int64,
+    )
+    duplicated = pd.Index(keys).duplicated()
+    if duplicated.any():
+        collided = sorted(
+            {
+                str(nexus)
+                for nexus, key in zip(groups.index, keys)
+                if key in set(keys[duplicated])
+            }
+        )
+        raise ValueError(
+            f"Weight file carries nexus ids that reduce to the same nexus "
+            f"number: {_describe(collided)}. Their weight groups cannot be "
+            f"told apart once matched against the hydrofabric."
+        )
+    return keys
+
+
+def _apply_coverage_policy(report: CoverageReport, on_missing: str) -> None:
+    """
+    Log or abort according to ``on_missing``.
+
+    Called before the weight array is handed back and therefore before any
+    Dask graph is built, so the ``error`` path costs one second rather than
+    one long compute.
+    """
+    if on_missing not in ON_MISSING_POLICIES:
+        raise ValueError(
+            f"Unknown on_missing policy {on_missing!r}; expected one of "
+            f"{', '.join(ON_MISSING_POLICIES)}."
+        )
+
+    if report.is_complete:
+        logger.info(f"Weights cover every feature in the run: {report.summary()}.")
+        return
+
+    if on_missing == "error":
+        raise ValueError(
+            f"Incomplete weight coverage and stats.weights.on_missing is "
+            f"'error': {report.summary()}. Supply weights for the missing "
+            f"nexus, or set on_missing to 'warn' to fall back to equal "
+            f"weights for the uncovered features."
+        )
+
+    logger.warning(
+        f"Incomplete {report.summary()}. The {report.uncovered_features} "
+        f"uncovered feature(s) fall back to equal weights, which is the simple "
+        f"mean. Set stats.weights.on_missing to 'error' to make this abort "
+        f"instead."
+    )
+
+
+def _expand_to_features(
+    groups: pd.DataFrame,
+    nexus_to_features: Mapping,
+    feature_ids: Sequence[int],
+    formulations: Sequence[str],
+) -> Tuple[xr.DataArray, CoverageReport]:
+    """
+    Broadcast per-nexus groups onto the run's features and fill the rest.
+
+    Every feature draining to a nexus receives that nexus' group unchanged, so
+    the many-to-one relationship needs no arithmetic: a confluence of three
+    flowpaths gives all three identical weights.  Features whose nexus supplied
+    no weights are filled with ``1 / n_formulations``.
+    """
+    targets = _as_feature_ids(feature_ids, "feature_ids")
+    if targets.size == 0:
+        raise ValueError(
+            "No feature ids were supplied to expand weights onto; coverage is "
+            "undefined for an empty run."
+        )
+    target_index = pd.Index(targets, name="feature_id")
+    if target_index.has_duplicates:
+        raise ValueError(
+            f"feature_ids carries duplicate value(s): "
+            f"{_describe(sorted(set(target_index[target_index.duplicated()])))}. "
+            f"The dataset's feature_id coordinate must be unique."
+        )
+
+    cross_features, cross_keys = _crosswalk_arrays(nexus_to_features)
+    group_keys = _group_keys(groups)
+
+    # Feature -> nexus key, with -1 marking a feature the crosswalk does not
+    # place (no hydrofabric row, or a nexus this run does not drain to).
+    # -1 never matches a real nexus key, so such features fall through to the
+    # uncovered branch without a special case.  The mask is applied before
+    # indexing rather than after: a -1 fed to a numpy take wraps to the last
+    # row instead of failing, which would hand a feature another nexus' weights.
+    from_cross = pd.Index(cross_features).get_indexer(target_index)
+    placed = from_cross >= 0
+    nexus_of_feature = np.full(target_index.size, -1, dtype=np.int64)
+    nexus_of_feature[placed] = cross_keys[from_cross[placed]]
+
+    # Nexus key -> row of the validated group frame; -1 where the file has no
+    # group for that nexus.
+    group_row = pd.Index(group_keys).get_indexer(nexus_of_feature)
+    covered = group_row >= 0
+
+    n_formulations = len(formulations)
+    matrix = np.full((target_index.size, n_formulations), 1.0 / n_formulations)
+    if covered.any():
+        matrix[covered] = groups.to_numpy(dtype=float)[group_row[covered]]
+
+    covered_count = int(covered.sum())
+    used_nexus = int(np.unique(group_row[covered]).size)
+    report = CoverageReport(
+        total_features=int(target_index.size),
+        covered_features=covered_count,
+        uncovered_features=int(target_index.size) - covered_count,
+        fraction=covered_count / int(target_index.size),
+        used_nexus=used_nexus,
+        unused_nexus=int(len(group_keys)) - used_nexus,
+    )
+
+    weights = xr.DataArray(
+        matrix,
+        dims=("feature_id", "formulation"),
+        coords={
+            "feature_id": target_index.to_numpy(),
+            "formulation": list(formulations),
+        },
+        name="ensemble_weight",
+    )
+    return weights, report
+
+
+def resolve_weights(
+    weights: pd.DataFrame,
+    formulation_index_map: Mapping[int, str],
+    formulations: Sequence[str],
+    nexus_to_features: Mapping,
+    feature_ids: Sequence[int],
+    normalize: bool = False,
+    on_missing: str = "warn",
+    tolerance: float = SUM_TOLERANCE,
+) -> Tuple[xr.DataArray, CoverageReport]:
+    """
+    Turn a tidy weight frame into a dense weight array over the run's features.
+
+    Validates the groups (see :func:`validate_weight_groups`), expands each
+    nexus group across every feature draining to that nexus, fills uncovered
+    features with equal weights, and applies the ``on_missing`` coverage
+    policy.  Pure: plain frames, dicts and sequences in; a labelled array and
+    a report out.  No file is read and no dataset is touched, so both the
+    validation errors and the coverage error are raised before any Dask graph
+    is built.
+
+    Parameters
+    ----------
+    weights:
+        Tidy weight frame as ``read_weight_file`` returns it.
+    formulation_index_map:
+        Binding from weight-file index to formulation name.
+    formulations:
+        The formulation names discovered in the run, in dataset order.
+    nexus_to_features:
+        Mapping from nexus to the feature ids draining to it, as the
+        hydrofabric crosswalk builder returns it.  Nexus ids may be integers
+        or prefixed strings; both are reduced the same way.
+    feature_ids:
+        The run's feature ids, in dataset order.  These become the returned
+        array's ``feature_id`` coordinate.
+    normalize:
+        Divide each group by its own sum instead of requiring it to sum to 1.
+    on_missing:
+        ``'warn'`` (default) fills uncovered features with equal weights and
+        logs the coverage; ``'error'`` raises instead.
+    tolerance:
+        How far a group's sum may sit from 1.0 when ``normalize`` is False.
+
+    Returns
+    -------
+    (xr.DataArray, CoverageReport)
+        The array is dense over ``(feature_id, formulation)``, coordinates in
+        the order supplied, every row summing to 1.  Labelled coordinates mean
+        the consumer aligns by name and cannot silently transpose the
+        formulation axis.  The report carries the counts and the coverage
+        fraction, for logging and for the output NetCDF's provenance.
+
+    Raises
+    ------
+    ValueError
+        Any validation rule fails, the crosswalk or the feature ids are
+        malformed, ``on_missing`` is unknown, or coverage is incomplete and
+        ``on_missing`` is ``'error'``.
+    """
+    groups = validate_weight_groups(
+        weights,
+        formulation_index_map,
+        formulations,
+        normalize=normalize,
+        tolerance=tolerance,
+    )
+    resolved, report = _expand_to_features(
+        groups, nexus_to_features, feature_ids, formulations
+    )
+    _apply_coverage_policy(report, on_missing)
+
+    logger.debug(
+        f"Resolved weights over {report.total_features} feature(s) and "
+        f"{len(formulations)} formulation(s); {report.summary()}."
+    )
+    return resolved, report

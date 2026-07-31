@@ -11,14 +11,22 @@ replaced without touching the validation and expansion rules.
 Submodules
 ----------
 reader   — read a weight file into a tidy, dtype-validated DataFrame
-resolve  — bind indices to formulation names and enforce the weight rules
+resolve  — bind indices to formulation names, enforce the weight rules, and
+           expand per-nexus groups into a dense array over the run's features
 """
 
 from teval.weights.reader import read_weight_file
-from teval.weights.resolve import bind_formulation_indices, validate_weight_groups
+from teval.weights.resolve import (
+    CoverageReport,
+    bind_formulation_indices,
+    resolve_weights,
+    validate_weight_groups,
+)
 
 __all__ = [
     "read_weight_file",
     "bind_formulation_indices",
     "validate_weight_groups",
+    "resolve_weights",
+    "CoverageReport",
 ]
