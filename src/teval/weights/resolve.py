@@ -52,7 +52,7 @@ import numpy as np
 import pandas as pd
 import xarray as xr
 
-from teval.identifiers import as_identifiers
+from teval.identifiers import as_identifiers, describe
 from teval.weights.reader import REQUIRED_COLUMNS
 
 logger = logging.getLogger(__name__)
@@ -63,17 +63,6 @@ SUM_TOLERANCE = 1e-6
 
 #: Accepted values of ``stats.weights.on_missing``.
 ON_MISSING_POLICIES = ("warn", "error")
-
-# How many offending nexus ids to name in an error message before truncating.
-_MAX_REPORTED = 10
-
-
-def _describe(items) -> str:
-    """Render a collection of identifiers as a short, truncated list."""
-    listed = list(items)[:_MAX_REPORTED]
-    text = ", ".join(str(item) for item in listed)
-    remaining = len(items) - len(listed)
-    return f"{text} (and {remaining} more)" if remaining else text or "(none)"
 
 
 def _require_legend_matches_run(
@@ -104,7 +93,7 @@ def _require_legend_matches_run(
     if repeated_in_run:
         raise ValueError(
             f"Formulation names must be unique; the run repeats: "
-            f"{_describe(repeated_in_run)}."
+            f"{describe(repeated_in_run)}."
         )
 
     mapped_names = set(formulation_index_map.values())
@@ -116,17 +105,17 @@ def _require_legend_matches_run(
     if unknown:
         problems.append(
             f"formulation_index_map names formulation(s) not present in "
-            f"the run: {_describe(unknown)}"
+            f"the run: {describe(unknown)}"
         )
     unmapped = sorted(set(run_names) - mapped_names)
     if unmapped:
         problems.append(
             f"formulation(s) present in the run are missing from "
-            f"formulation_index_map: {_describe(unmapped)}"
+            f"formulation_index_map: {describe(unmapped)}"
         )
     raise ValueError(
         f"{'; '.join(problems)}. The run's formulations are "
-        f"{_describe(run_names)} and the map names {_describe(sorted(mapped_names))}. "
+        f"{describe(run_names)} and the map names {describe(sorted(mapped_names))}. "
         f"Weighting requires the two to match exactly."
     )
 
@@ -185,10 +174,10 @@ def _relabel(
     if not unknown.empty:
         raise ValueError(
             f"Weight file uses formulation_index value(s) "
-            f"{_describe(sorted(set(unknown['formulation_index'])))} that "
+            f"{describe(sorted(set(unknown['formulation_index'])))} that "
             f"formulation_index_map does not define (it defines "
-            f"{_describe(sorted(by_index))}), at nexus "
-            f"{_describe(sorted(set(unknown['nexus_id'])))}."
+            f"{describe(sorted(by_index))}), at nexus "
+            f"{describe(sorted(set(unknown['nexus_id'])))}."
         )
     return tidy.assign(formulation=named).drop(columns="formulation_index")
 
@@ -210,7 +199,7 @@ def _require_complete_groups(tidy: pd.DataFrame, formulations: Sequence[str]) ->
         )
         raise ValueError(
             f"Weight file has duplicate rows for "
-            f"{_describe([f'{nexus} formulation {name}' for nexus, name in pairs])}. "
+            f"{describe([f'{nexus} formulation {name}' for nexus, name in pairs])}. "
             f"Each nexus must carry exactly one row per formulation; "
             f"duplicates usually mean two weight files were concatenated."
         )
@@ -223,9 +212,9 @@ def _require_complete_groups(tidy: pd.DataFrame, formulations: Sequence[str]) ->
     if incomplete:
         raise ValueError(
             f"Weight file has incomplete weight group(s): "
-            f"{_describe(incomplete)}. A nexus present in the file must carry "
+            f"{describe(incomplete)}. A nexus present in the file must carry "
             f"a weight for every formulation in the run "
-            f"({_describe(sorted(expected))}), so no member can silently drop "
+            f"({describe(sorted(expected))}), so no member can silently drop "
             f"out at one location. A nexus with no rows at all is allowed and "
             f"is handled by the coverage policy."
         )
@@ -239,7 +228,7 @@ def _require_valid_weight_values(tidy: pd.DataFrame) -> None:
     if not non_finite.empty:
         raise ValueError(
             f"Weight file has non-finite weights at nexus "
-            f"{_describe(sorted(set(non_finite)))}. Every weight must be a "
+            f"{describe(sorted(set(non_finite)))}. Every weight must be a "
             f"finite, non-negative number."
         )
 
@@ -247,7 +236,7 @@ def _require_valid_weight_values(tidy: pd.DataFrame) -> None:
     if not negative.empty:
         raise ValueError(
             f"Weight file has negative weights at nexus "
-            f"{_describe(sorted(set(negative)))} (minimum {weight.min()}). "
+            f"{describe(sorted(set(negative)))} (minimum {weight.min()}). "
             f"Negative weights are not physically meaningful in an ensemble "
             f"combination."
         )
@@ -283,7 +272,7 @@ def _apply_sum_rule(
     if all_zero:
         raise ValueError(
             f"Weight file has all-zero weight group(s) at nexus "
-            f"{_describe(all_zero)}. A group of zeros would produce zero flow "
+            f"{describe(all_zero)}. A group of zeros would produce zero flow "
             f"at that location. Individual zero weights are permitted, but at "
             f"least one weight in a group must be non-zero."
         )
@@ -302,7 +291,7 @@ def _apply_sum_rule(
         ]
         raise ValueError(
             f"Weight group(s) do not sum to 1 within {tolerance:g}: "
-            f"{_describe(offenders)}. Fix the file, or set "
+            f"{describe(offenders)}. Fix the file, or set "
             f"stats.weights.normalize to divide each group by its own sum."
         )
     return wide
@@ -463,7 +452,7 @@ def _nexus_keys(values: Iterable, context: str) -> np.ndarray:
     if booleans:
         raise ValueError(
             f"{context} is not a nexus identifier: "
-            f"{_describe([repr(v) for v in booleans])}."
+            f"{describe([repr(v) for v in booleans])}."
         )
 
     reduced = as_identifiers(series, context)
@@ -473,7 +462,7 @@ def _nexus_keys(values: Iterable, context: str) -> np.ndarray:
         raise ValueError(
             f"{context} carries no digits and cannot be matched against the "
             f"hydrofabric's integer nexus ids: "
-            f"{_describe([repr(v) for v in series[unreadable]])}."
+            f"{describe([repr(v) for v in series[unreadable]])}."
         )
     return reduced.to_numpy(dtype=np.int64)
 
@@ -535,7 +524,7 @@ def _crosswalk_arrays(
     conflicted = pairs.loc[pairs["feature_id"].duplicated(keep=False), "feature_id"]
     if not conflicted.empty:
         raise ValueError(
-            f"Crosswalk assigns feature(s) {_describe(sorted(set(conflicted)))} "
+            f"Crosswalk assigns feature(s) {describe(sorted(set(conflicted)))} "
             f"to more than one nexus, so their weights would be ambiguous. A "
             f"flowpath drains to exactly one nexus."
         )
@@ -559,7 +548,7 @@ def _group_keys(groups: pd.DataFrame) -> np.ndarray:
         )
         raise ValueError(
             f"Weight file carries nexus ids that reduce to the same nexus "
-            f"number: {_describe(collided)}. Their weight groups cannot be "
+            f"number: {describe(collided)}. Their weight groups cannot be "
             f"told apart once matched against the hydrofabric."
         )
     return keys
@@ -628,7 +617,7 @@ def _expand_to_features(
     if target_index.has_duplicates:
         raise ValueError(
             f"feature_ids carries duplicate value(s): "
-            f"{_describe(sorted(set(target_index[target_index.duplicated()])))}. "
+            f"{describe(sorted(set(target_index[target_index.duplicated()])))}. "
             f"The dataset's feature_id coordinate must be unique."
         )
 

@@ -35,6 +35,8 @@ from typing import Union
 
 import pandas as pd
 
+from teval.identifiers import describe
+
 logger = logging.getLogger(__name__)
 
 #: Columns a weight file must carry.  Any other column is dropped.
@@ -42,18 +44,6 @@ REQUIRED_COLUMNS = ("nexus_id", "formulation_index", "weight")
 
 #: File suffixes this reader can dispatch on.
 SUPPORTED_SUFFIXES = (".csv", ".parquet")
-
-# How many offending row positions to name in an error message before
-# truncating.  Enough to see a pattern, short enough to stay readable.
-_MAX_REPORTED_ROWS = 10
-
-
-def _describe_rows(positions) -> str:
-    """Render 0-based row positions as a short, truncated list for an error."""
-    listed = [int(p) for p in positions[:_MAX_REPORTED_ROWS]]
-    text = ", ".join(str(p) for p in listed)
-    remaining = len(positions) - len(listed)
-    return f"{text} (and {remaining} more)" if remaining else text
 
 
 def _load_frame(file_path: Path) -> pd.DataFrame:
@@ -102,7 +92,7 @@ def _require_no_nulls(df: pd.DataFrame, file_path: Path) -> None:
         if null_positions:
             raise ValueError(
                 f"Weight file {file_path} has missing values in column "
-                f"'{column}' at row(s) {_describe_rows(null_positions)}. "
+                f"'{column}' at row(s) {describe(null_positions)}. "
                 f"Every row must carry all of {', '.join(REQUIRED_COLUMNS)}."
             )
 
@@ -124,7 +114,7 @@ def _coerce_nexus_id(values: pd.Series, file_path: Path) -> pd.Series:
     if blank_positions:
         raise ValueError(
             f"Weight file {file_path} has blank 'nexus_id' values at row(s) "
-            f"{_describe_rows(blank_positions)}."
+            f"{describe(blank_positions)}."
         )
     return nexus_id
 
@@ -137,7 +127,7 @@ def _coerce_formulation_index(values: pd.Series, file_path: Path) -> pd.Series:
     if bad_positions:
         raise ValueError(
             f"Weight file {file_path} has non-numeric 'formulation_index' "
-            f"values at row(s) {_describe_rows(bad_positions)}: "
+            f"values at row(s) {describe(bad_positions)}: "
             f"{sorted(set(values.loc[bad_positions].astype(str)))}. "
             f"'formulation_index' must be a 1-based integer."
         )
@@ -146,7 +136,7 @@ def _coerce_formulation_index(values: pd.Series, file_path: Path) -> pd.Series:
     if fractional_positions:
         raise ValueError(
             f"Weight file {file_path} has non-integer 'formulation_index' "
-            f"values at row(s) {_describe_rows(fractional_positions)}: "
+            f"values at row(s) {describe(fractional_positions)}: "
             f"{sorted(set(numeric.loc[fractional_positions]))}. "
             f"'formulation_index' must be a 1-based integer."
         )
@@ -161,7 +151,7 @@ def _coerce_weight(values: pd.Series, file_path: Path) -> pd.Series:
     if bad_positions:
         raise ValueError(
             f"Weight file {file_path} has non-numeric 'weight' values at "
-            f"row(s) {_describe_rows(bad_positions)}: "
+            f"row(s) {describe(bad_positions)}: "
             f"{sorted(set(values.loc[bad_positions].astype(str)))}. "
             f"'weight' must be a float."
         )

@@ -15,6 +15,8 @@ Public API
 as_identifiers(values, context)
     Reduce an identifier column to numbers, with NA where an entry carries no
     identifier at all.
+describe(items)
+    Render offending values as a short, truncated list for an error message.
 """
 
 from __future__ import annotations
@@ -28,6 +30,24 @@ logger = logging.getLogger(__name__)
 # Everything that is not a digit, stripped when reducing a string identifier
 # such as "nex-9001" to the integer form load_hydrofabric stores.
 _NON_DIGITS = r"\D+"
+
+#: How many offenders an error message names before truncating.  Enough to see
+#: a pattern, short enough to stay readable.
+MAX_REPORTED = 10
+
+
+def describe(items) -> str:
+    """
+    Render a collection as a short, truncated list for an error message.
+
+    Shared by every module that names what it is rejecting -- identifiers,
+    formulation names, row positions -- so one bad file reads the same way
+    wherever it was caught.
+    """
+    listed = list(items)[:MAX_REPORTED]
+    text = ", ".join(str(item) for item in listed)
+    remaining = len(items) - len(listed)
+    return f"{text} (and {remaining} more)" if remaining else text or "(none)"
 
 
 def as_identifiers(values: pd.Series, context: str) -> pd.Series:
@@ -96,9 +116,9 @@ def as_identifiers(values: pd.Series, context: str) -> pd.Series:
 
     fractional = numeric.notna() & (numeric % 1 != 0)
     if fractional.any():
-        offenders = sorted(set(numeric[fractional].tolist()))[:10]
         raise ValueError(
-            f"{context} carries non-integer value(s) {offenders}; hydrofabric "
-            f"identifiers are integers."
+            f"{context} carries non-integer value(s) "
+            f"{describe(sorted(set(numeric[fractional].tolist())))}; "
+            f"hydrofabric identifiers are integers."
         )
     return numeric
