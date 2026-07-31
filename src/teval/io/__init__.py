@@ -17,6 +17,7 @@ from teval.io.discovery import (
 )
 from teval.io.hydrofabric import (
     load_hydrofabric,
+    build_nexus_crosswalk,
     find_tailwater_feature,
 )
 from teval.io.observations import fetch_observations
@@ -26,6 +27,7 @@ __all__ = [
     "discover_formulation_files",
     "initialize_domains",
     "load_hydrofabric",
+    "build_nexus_crosswalk",
     "find_tailwater_feature",
     "fetch_observations",
 ]
