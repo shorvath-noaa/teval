@@ -55,19 +55,31 @@ def get_gage_fids(domain_data: Dict, viz_config: VizConfig) -> np.ndarray:
 
 # Functions for loading domain data based on the domain map created in initialize_domains
 def load_domain_data(domain_dict: Dict, io: IOConfig, stats_config: StatsConfig) -> Dict:
-    """Load all data needed for one domain: formulations, hydrofabric, and observations."""
+    """
+    Load all data needed for one domain: hydrofabric, formulations, and observations.
+
+    The three steps are ordered by what they depend on, not by convenience:
+
+    1. Hydrofabric first.  It depends only on domain_dict['hydrofabric'], so it
+       can be loaded before anything else -- and it must be, because the
+       nexus-to-feature crosswalk it yields is what a weighted run needs in
+       hand before the ensemble stats graph is built.
+    2. Formulations second, which is where the stats graph is constructed.
+    3. Observations last, because the fetch window is derived from the time
+       bounds the formulation files report.
+    """
     results = {}
-    
+
+    # Process Hydrofabric
+    results['hydrofabric'], all_gage_ids, results['gage_to_fids'], results['gage_to_nexus'] = load_hydrofabric(domain_dict['hydrofabric'])
+
     # Process Formulations
     results['formulations'] = {'combined': None, 'ensemble_members': None}
     ds_stats, ds_members, t_min, t_max = _process_formulation_files(domain_dict['formulations'], stats_config)
-    
+
     results['formulations']['combined'] = ds_stats
     results['formulations']['ensemble_members'] = ds_members
-    
-    # Process Hydrofabric
-    results['hydrofabric'], all_gage_ids, results['gage_to_fids'], results['gage_to_nexus'] = load_hydrofabric(domain_dict['hydrofabric'])
-    
+
     initial_gages = domain_dict.get('gage_obs', {}).get('domain_name', [])
     if "CONUS" in initial_gages: initial_gages.remove("CONUS")
     gage_ids = list(set(initial_gages + all_gage_ids))
