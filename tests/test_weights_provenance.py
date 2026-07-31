@@ -20,7 +20,7 @@ import pytest
 import xarray as xr
 
 from teval.config import WeightsConfig
-from teval.weights import CoverageReport, weighting_attrs
+from teval.weights import AppliedWeighting, CoverageReport, weighting_attrs
 from teval.weights.provenance import (
     APPLIED_ATTR,
     APPLIED_FALSE,
@@ -56,7 +56,9 @@ def _config(path="weights.csv", **overrides):
 # --------------------------------------------------------------------- #
 def test_a_weighted_run_records_the_file_and_the_coverage():
     """All three attributes, with the file named as the configuration named it."""
-    attrs = weighting_attrs(_config("/data/national_weights.parquet"), _report())
+    attrs = weighting_attrs(
+        AppliedWeighting(_config("/data/national_weights.parquet"), _report())
+    )
 
     assert attrs == {
         APPLIED_ATTR: APPLIED_TRUE,
@@ -79,7 +81,7 @@ def test_an_unweighted_run_records_that_weighting_was_not_applied():
 
 def test_the_two_kinds_of_run_disagree_on_the_flag():
     """Stated directly, since 'distinguishable' is the requirement."""
-    weighted = weighting_attrs(_config(), _report())
+    weighted = weighting_attrs(AppliedWeighting(_config(), _report()))
     unweighted = weighting_attrs()
 
     assert weighted[APPLIED_ATTR] != unweighted[APPLIED_ATTR]
@@ -101,7 +103,7 @@ def test_an_unweighted_run_records_no_file_and_no_coverage():
 
 def test_partial_coverage_is_recorded_as_the_achieved_fraction():
     """The fraction reported is the resolution's, not a rounded stand-in."""
-    attrs = weighting_attrs(_config(), _report(covered=3, total=4))
+    attrs = weighting_attrs(AppliedWeighting(_config(), _report(covered=3, total=4)))
 
     assert attrs[COVERAGE_ATTR] == pytest.approx(0.75)
 
@@ -114,7 +116,7 @@ def test_zero_coverage_still_records_weighting_as_applied():
     to an unweighted run — so the coverage fraction is the only thing that
     says so, and the flag must not quietly flip to 'false' and hide it.
     """
-    attrs = weighting_attrs(_config(), _report(covered=0, total=4))
+    attrs = weighting_attrs(AppliedWeighting(_config(), _report(covered=0, total=4)))
 
     assert attrs[APPLIED_ATTR] == APPLIED_TRUE
     assert attrs[COVERAGE_ATTR] == pytest.approx(0.0)
@@ -124,21 +126,24 @@ def test_zero_coverage_still_records_weighting_as_applied():
 # Misuse                                                                #
 # --------------------------------------------------------------------- #
 @pytest.mark.parametrize(
-    "config, report",
+    "half",
     [
-        pytest.param(_config(), None, id="config-without-report"),
-        pytest.param(None, _report(), id="report-without-config"),
+        pytest.param({"config": _config()}, id="config-without-report"),
+        pytest.param({"report": _report()}, id="report-without-config"),
     ],
 )
-def test_half_a_weighted_run_is_rejected(config, report):
+def test_half_a_weighted_run_cannot_be_expressed(half):
     """
     The pair travels together; one alone means the caller lost track.
 
     Filling in the other half by guessing would write provenance that
-    misdescribes the file, which is worse than the run failing here.
+    misdescribes the file, so the record refuses to exist without both.  There
+    is no runtime check behind this — the halves are required fields, which is
+    why ``weighting_attrs`` takes one argument and needs no rule about how its
+    arguments agree.
     """
-    with pytest.raises(ValueError, match="both"):
-        weighting_attrs(config, report)
+    with pytest.raises(TypeError, match="required"):
+        AppliedWeighting(**half)
 
 
 # --------------------------------------------------------------------- #
@@ -147,7 +152,10 @@ def test_half_a_weighted_run_is_rejected(config, report):
 @pytest.mark.parametrize(
     "attrs",
     [
-        pytest.param(weighting_attrs(_config("w.csv"), _report(3, 4)), id="weighted"),
+        pytest.param(
+            weighting_attrs(AppliedWeighting(_config("w.csv"), _report(3, 4))),
+            id="weighted",
+        ),
         pytest.param(weighting_attrs(), id="unweighted"),
     ],
 )

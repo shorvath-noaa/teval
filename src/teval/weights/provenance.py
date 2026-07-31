@@ -27,12 +27,15 @@ through the file where a Python ``bool`` would not.
 
 Public API
 ----------
-weighting_attrs(config=None, report=None)
+AppliedWeighting
+    What a weighted run applied: the configuration and the coverage reached.
+weighting_attrs(applied=None)
     Build the attribute mapping for a run, weighted or not.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from teval.config import WeightsConfig
@@ -50,21 +53,38 @@ APPLIED_TRUE = "true"
 APPLIED_FALSE = "false"
 
 
-def weighting_attrs(
-    config: Optional[WeightsConfig] = None,
-    report: Optional[CoverageReport] = None,
-) -> Dict[str, Any]:
+@dataclass(frozen=True)
+class AppliedWeighting:
+    """
+    What a weighted run applied: the configuration, and how far it reached.
+
+    The two describe one event between them, and the resolution step produces
+    them together, so they travel as one value.  A run then either has this or
+    has ``None``, and there is no way to hold half of it -- which is what lets
+    an unweighted run be a single absent argument rather than two absences a
+    caller has to keep in agreement.
+
+    Attributes
+    ----------
+    config:
+        The ``stats.weights`` block that was applied.
+    report:
+        The coverage the resolution achieved, as ``resolve_weights`` returned
+        it.
+    """
+
+    config: WeightsConfig
+    report: CoverageReport
+
+
+def weighting_attrs(applied: Optional[AppliedWeighting] = None) -> Dict[str, Any]:
     """
     Build the provenance attributes describing how the mean was combined.
 
     Parameters
     ----------
-    config:
-        The ``stats.weights`` block that was applied, or ``None`` for an
-        unweighted run.
-    report:
-        The coverage the resolution achieved, as ``resolve_weights`` returned
-        it, or ``None`` for an unweighted run.
+    applied:
+        The weighting this run applied, or ``None`` for an unweighted run.
 
     Returns
     -------
@@ -75,28 +95,12 @@ def weighting_attrs(
         rather than zero-filled when nothing was applied, since a recorded
         coverage of 0.0 would read as "weighting was attempted and reached
         nothing", which is a different — and much worse — outcome.
-
-    Raises
-    ------
-    ValueError
-        Exactly one of *config* and *report* is given.  The pair travels
-        together out of the resolution step, so a lone one means the caller
-        lost track of which run it is describing, and guessing would write
-        provenance that misdescribes the file.
     """
-    if (config is None) != (report is None):
-        raise ValueError(
-            "weighting_attrs needs both the weights configuration and the "
-            "coverage report, or neither: a weighted run has both and an "
-            f"unweighted run has neither; got config={config!r}, "
-            f"report={report!r}."
-        )
-
-    if config is None:
+    if applied is None:
         return {APPLIED_ATTR: APPLIED_FALSE}
 
     return {
         APPLIED_ATTR: APPLIED_TRUE,
-        FILE_ATTR: str(config.file),
-        COVERAGE_ATTR: float(report.fraction),
+        FILE_ATTR: str(applied.config.file),
+        COVERAGE_ATTR: float(applied.report.fraction),
     }

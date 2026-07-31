@@ -18,7 +18,7 @@ provenance  — the attributes recording, in the output file itself, whether
               weighting was applied and how far it reached
 """
 
-from teval.weights.provenance import weighting_attrs
+from teval.weights.provenance import AppliedWeighting, weighting_attrs
 from teval.weights.reader import read_weight_file
 from teval.weights.resolve import (
     CoverageReport,
@@ -31,5 +31,6 @@ __all__ = [
     "validate_weight_groups",
     "resolve_weights",
     "CoverageReport",
+    "AppliedWeighting",
     "weighting_attrs",
 ]

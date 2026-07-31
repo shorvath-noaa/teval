@@ -17,7 +17,7 @@ from teval.ensemble_methods.stats import build_stats
 from teval.io import load_hydrofabric, fetch_observations, build_nexus_crosswalk
 from teval.utils import Timer
 from teval.metrics import deterministic as det
-from teval.weights import CoverageReport, read_weight_file, resolve_weights, weighting_attrs
+from teval.weights import AppliedWeighting, read_weight_file, resolve_weights, weighting_attrs
 import teval.viz.static as tviz
 import teval.viz.animation as tanim
 
@@ -161,7 +161,7 @@ def _prepare_weight_plan(
 def _resolve_domain_weights(
     plan: _WeightPlan,
     combined_ds: xr.Dataset,
-) -> Tuple[xr.DataArray, CoverageReport]:
+) -> Tuple[xr.DataArray, AppliedWeighting]:
     """
     Resolve the plan against the run's formulations and feature ids.
 
@@ -174,13 +174,17 @@ def _resolve_domain_weights(
 
     The coverage report comes back alongside the weights rather than being
     logged and dropped, because the achieved coverage is written into the
-    output file as provenance -- see ``teval.weights.provenance``.
+    output file as provenance -- see ``teval.weights.provenance``.  It is
+    returned already paired with the configuration that produced it, as the
+    ``AppliedWeighting`` the provenance step takes, so the caller hands that
+    value straight on instead of taking the pair apart and rebuilding it from
+    two places.
 
     Returns
     -------
-    (xr.DataArray, CoverageReport)
+    (xr.DataArray, AppliedWeighting)
         Dense weights over ``(feature_id, formulation)``, ready to hand to
-        ``build_stats``, and what the resolution achieved.
+        ``build_stats``, and what the resolution applied and achieved.
 
     Raises
     ------
@@ -214,7 +218,7 @@ def _resolve_domain_weights(
         f"Applying ensemble weights from {plan.config.file}: {report.summary()}. "
         f"Median and the spread band remain unweighted."
     )
-    return weights, report
+    return weights, AppliedWeighting(config=plan.config, report=report)
 
 
 # Functions for loading domain data based on the domain map created in initialize_domains
@@ -358,7 +362,7 @@ def _process_formulation_files(
 
     # Calculate Stats
     if ds_stats is None and combined_ds is not None:
-        weights, report = (
+        weights, applied = (
             (None, None) if weight_plan is None
             else _resolve_domain_weights(weight_plan, combined_ds)
         )
@@ -368,9 +372,7 @@ def _process_formulation_files(
         # to the NetCDF the pipeline writes from it.  Written on both branches:
         # the point is that a file says which kind of mean it holds, and an
         # unweighted run saying nothing at all would leave that to inference.
-        ds_stats.attrs.update(
-            weighting_attrs(None if weight_plan is None else weight_plan.config, report)
-        )
+        ds_stats.attrs.update(weighting_attrs(applied))
 
     elif ds_stats is None and combined_ds is None:
         raise ValueError("No ensemble file or raw formulation files found to process.")
