@@ -623,7 +623,12 @@ def _apply_coverage_policy(report: CoverageReport, on_missing: str) -> None:
         )
 
     if report.is_complete:
-        logger.info(f"Weights cover every feature in the run: {report.summary()}.")
+        # Debug rather than info: complete coverage is the uneventful case, and
+        # the caller wiring weights into a run emits one summary line per domain
+        # naming the file it came from.  Two identical summaries per domain, one
+        # of them without the file path, is noise.  Incomplete coverage still
+        # warns from here, since that is the resolver's own policy decision.
+        logger.debug(f"Weights cover every feature in the run: {report.summary()}.")
         return
 
     if on_missing == "error":

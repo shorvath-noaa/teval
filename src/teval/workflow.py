@@ -5,17 +5,19 @@ import pandas as pd
 import numpy as np
 import geopandas as gpd
 import matplotlib.pyplot as plt
-from typing import Dict, List
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 import logging
 import multiprocessing
 from joblib import Parallel, delayed
 import gc
 
-from teval.config import IOConfig, MetricsConfig, StatsConfig, VizConfig
+from teval.config import IOConfig, MetricsConfig, StatsConfig, VizConfig, WeightsConfig
 from teval.ensemble_methods.stats import build_stats
-from teval.io import load_hydrofabric, fetch_observations
+from teval.io import load_hydrofabric, fetch_observations, build_nexus_crosswalk
 from teval.utils import Timer
 from teval.metrics import deterministic as det
+from teval.weights import read_weight_file, resolve_weights
 import teval.viz.static as tviz
 import teval.viz.animation as tanim
 
@@ -53,6 +55,121 @@ def get_gage_fids(domain_data: Dict, viz_config: VizConfig) -> np.ndarray:
 
     return np.intersect1d(list(set(required_fids)), ds_stats.feature_id.values)
 
+# --------------------------------------------------------------------- #
+# Ensemble weights                                                      #
+# --------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class _WeightPlan:
+    """
+    The parts of a weighted run that are known before the ensemble is opened.
+
+    The weight file and the nexus-to-feature crosswalk depend only on the
+    configuration and on the hydrofabric, so both can be -- and are -- gathered
+    while the hydrofabric is still the only thing loaded.  What is *not* known
+    until the formulation files are opened is the run's formulation names and
+    its feature ids, and those are exactly what the resolution needs.  The plan
+    therefore carries the file-derived halves into the formulation step, where
+    the remaining two arrive and the weights are resolved.
+
+    That still happens before ``build_stats`` constructs the graph, which is
+    the property that matters: every weight rule and the coverage policy are
+    decided in the first second of a run rather than after a long compute.
+
+    Attributes
+    ----------
+    config:
+        The validated ``stats.weights`` block.
+    frame:
+        Tidy weight frame as ``read_weight_file`` returned it.
+    crosswalk:
+        Nexus to draining feature ids, as ``build_nexus_crosswalk`` returned it.
+        Empty when the domain has no hydrofabric, which surfaces as zero
+        coverage under the configured ``on_missing`` policy.
+    """
+
+    config: WeightsConfig
+    frame: pd.DataFrame
+    crosswalk: Dict[int, List[int]]
+
+
+def _prepare_weight_plan(
+    stats_config: StatsConfig,
+    gdf_hydro: gpd.GeoDataFrame,
+) -> Optional[_WeightPlan]:
+    """
+    Read the weight file and build the crosswalk, or return None if unweighted.
+
+    ``None`` means no ``stats.weights`` block was configured, and the caller
+    leaves the unweighted code path entirely untouched -- no file is read, no
+    crosswalk is built and ``build_stats`` is reached exactly as before.
+    """
+    weights_config = stats_config.weights
+    if weights_config is None:
+        return None
+
+    frame = read_weight_file(weights_config.file)
+    crosswalk = build_nexus_crosswalk(gdf_hydro)
+    logger.debug(
+        f"Read {len(frame)} weight row(s) from {weights_config.file}; the "
+        f"hydrofabric crosswalk covers {len(crosswalk)} nexus."
+    )
+    return _WeightPlan(config=weights_config, frame=frame, crosswalk=crosswalk)
+
+
+def _resolve_domain_weights(
+    plan: _WeightPlan,
+    combined_ds: xr.Dataset,
+) -> xr.DataArray:
+    """
+    Resolve the plan against the run's formulations and feature ids.
+
+    Called once per domain, from the formulation step, as soon as the combined
+    dataset exists and before its statistics graph is built.  The formulation
+    names come from the dataset's own coordinate rather than from the raw file
+    dict, so the returned array is labelled with exactly what ``build_stats``
+    will match it against.
+
+    Returns
+    -------
+    xr.DataArray
+        Dense weights over ``(feature_id, formulation)``, ready to hand to
+        ``build_stats``.
+
+    Raises
+    ------
+    ValueError
+        The dataset lacks a coordinate the resolution needs, or any weight
+        rule or the coverage policy rejects the file.
+    """
+    for coord in ("formulation", "feature_id"):
+        if coord not in combined_ds.coords:
+            found = ", ".join(str(c) for c in combined_ds.coords) or "(none)"
+            raise ValueError(
+                f"Ensemble weights are configured, but the combined formulation "
+                f"dataset carries no '{coord}' coordinate, so the weights cannot "
+                f"be matched to this run. Found coordinate(s): {found}."
+            )
+
+    weights, report = resolve_weights(
+        plan.frame,
+        plan.config.formulation_index_map,
+        [str(name) for name in combined_ds["formulation"].values],
+        plan.crosswalk,
+        combined_ds["feature_id"].values,
+        normalize=plan.config.normalize,
+        on_missing=plan.config.on_missing,
+    )
+
+    # One summary line per domain, naming the file that produced it, so a run's
+    # log says which weights were applied and how much of the domain they
+    # reached without having to reconstruct it from the resolver's own lines.
+    logger.info(
+        f"Applying ensemble weights from {plan.config.file}: {report.summary()}. "
+        f"Median and the spread band remain unweighted."
+    )
+    return weights
+
+
 # Functions for loading domain data based on the domain map created in initialize_domains
 def load_domain_data(domain_dict: Dict, io: IOConfig, stats_config: StatsConfig) -> Dict:
     """
@@ -65,17 +182,26 @@ def load_domain_data(domain_dict: Dict, io: IOConfig, stats_config: StatsConfig)
        nexus-to-feature crosswalk it yields is what a weighted run needs in
        hand before the ensemble stats graph is built.
     2. Formulations second, which is where the stats graph is constructed.
+       When stats.weights is configured, the weight plan built from steps 1's
+       hydrofabric is resolved here, against the formulation names and feature
+       ids the opened dataset reports, and handed to build_stats.
     3. Observations last, because the fetch window is derived from the time
        bounds the formulation files report.
+
+    With no stats.weights block the plan is None and every step behaves exactly
+    as it did before weighting existed.
     """
     results = {}
 
     # Process Hydrofabric
     results['hydrofabric'], all_gage_ids, results['gage_to_fids'], results['gage_to_nexus'] = load_hydrofabric(domain_dict['hydrofabric'])
 
+    # Prepare Weights (no-op when stats.weights is absent)
+    weight_plan = _prepare_weight_plan(stats_config, results['hydrofabric'])
+
     # Process Formulations
     results['formulations'] = {'combined': None, 'ensemble_members': None}
-    ds_stats, ds_members, t_min, t_max = _process_formulation_files(domain_dict['formulations'], stats_config)
+    ds_stats, ds_members, t_min, t_max = _process_formulation_files(domain_dict['formulations'], stats_config, weight_plan)
 
     results['formulations']['combined'] = ds_stats
     results['formulations']['ensemble_members'] = ds_members
@@ -89,10 +215,21 @@ def load_domain_data(domain_dict: Dict, io: IOConfig, stats_config: StatsConfig)
 
     return results
 
-def _process_formulation_files(formulation_dict: Dict, stats_config: StatsConfig) -> tuple:
+def _process_formulation_files(
+    formulation_dict: Dict,
+    stats_config: StatsConfig,
+    weight_plan: Optional[_WeightPlan] = None,
+) -> tuple:
     """
     Loads pre-computed ensemble if available, and raw members if available.
     Calculates stats only if a pre-computed ensemble is not provided.
+
+    *weight_plan* carries the weight file and the nexus crosswalk gathered by
+    ``load_domain_data`` before this step ran; it is resolved against the
+    dataset opened here and passed to ``build_stats``.  ``None`` -- the default,
+    and what an unconfigured run supplies -- takes the unweighted path
+    unchanged.  A pre-computed ensemble is returned as it was written and the
+    plan goes unused, since the statistics it holds were built elsewhere.
     """
     raw_files = formulation_dict.get("raw_files", {})
     ensemble_file = formulation_dict.get("ensemble_file")
@@ -133,8 +270,12 @@ def _process_formulation_files(formulation_dict: Dict, stats_config: StatsConfig
 
     # Calculate Stats
     if ds_stats is None and combined_ds is not None:
-        ds_stats = build_stats(combined_ds, raw_files, stats_config)
-        
+        weights = (
+            None if weight_plan is None
+            else _resolve_domain_weights(weight_plan, combined_ds)
+        )
+        ds_stats = build_stats(combined_ds, raw_files, stats_config, weights=weights)
+
     elif ds_stats is None and combined_ds is None:
         raise ValueError("No ensemble file or raw formulation files found to process.")
         
