@@ -6,7 +6,7 @@ import numpy as np
 import geopandas as gpd
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 import logging
 import multiprocessing
 from joblib import Parallel, delayed
@@ -17,7 +17,7 @@ from teval.ensemble_methods.stats import build_stats
 from teval.io import load_hydrofabric, fetch_observations, build_nexus_crosswalk
 from teval.utils import Timer
 from teval.metrics import deterministic as det
-from teval.weights import read_weight_file, resolve_weights
+from teval.weights import CoverageReport, read_weight_file, resolve_weights, weighting_attrs
 import teval.viz.static as tviz
 import teval.viz.animation as tanim
 
@@ -119,7 +119,7 @@ def _prepare_weight_plan(
 def _resolve_domain_weights(
     plan: _WeightPlan,
     combined_ds: xr.Dataset,
-) -> xr.DataArray:
+) -> Tuple[xr.DataArray, CoverageReport]:
     """
     Resolve the plan against the run's formulations and feature ids.
 
@@ -129,11 +129,15 @@ def _resolve_domain_weights(
     dict, so the returned array is labelled with exactly what ``build_stats``
     will match it against.
 
+    The coverage report comes back alongside the weights rather than being
+    logged and dropped, because the achieved coverage is written into the
+    output file as provenance -- see ``teval.weights.provenance``.
+
     Returns
     -------
-    xr.DataArray
+    (xr.DataArray, CoverageReport)
         Dense weights over ``(feature_id, formulation)``, ready to hand to
-        ``build_stats``.
+        ``build_stats``, and what the resolution achieved.
 
     Raises
     ------
@@ -167,7 +171,7 @@ def _resolve_domain_weights(
         f"Applying ensemble weights from {plan.config.file}: {report.summary()}. "
         f"Median and the spread band remain unweighted."
     )
-    return weights
+    return weights, report
 
 
 # Functions for loading domain data based on the domain map created in initialize_domains
@@ -230,6 +234,12 @@ def _process_formulation_files(
     and what an unconfigured run supplies -- takes the unweighted path
     unchanged.  A pre-computed ensemble is returned as it was written and the
     plan goes unused, since the statistics it holds were built elsewhere.
+
+    Whichever path the mean took is recorded on the returned statistics dataset
+    as provenance attributes, so the output NetCDF the pipeline writes from it
+    says for itself whether it holds a weighted mean.  A pre-computed ensemble
+    keeps whatever attributes it was written with, untouched: this step did not
+    build those statistics and so has nothing to attest about them.
     """
     raw_files = formulation_dict.get("raw_files", {})
     ensemble_file = formulation_dict.get("ensemble_file")
@@ -270,11 +280,19 @@ def _process_formulation_files(
 
     # Calculate Stats
     if ds_stats is None and combined_ds is not None:
-        weights = (
-            None if weight_plan is None
+        weights, report = (
+            (None, None) if weight_plan is None
             else _resolve_domain_weights(weight_plan, combined_ds)
         )
         ds_stats = build_stats(combined_ds, raw_files, stats_config, weights=weights)
+
+        # Provenance, recorded on the statistics dataset itself so it travels
+        # to the NetCDF the pipeline writes from it.  Written on both branches:
+        # the point is that a file says which kind of mean it holds, and an
+        # unweighted run saying nothing at all would leave that to inference.
+        ds_stats.attrs.update(
+            weighting_attrs(None if weight_plan is None else weight_plan.config, report)
+        )
 
     elif ds_stats is None and combined_ds is None:
         raise ValueError("No ensemble file or raw formulation files found to process.")

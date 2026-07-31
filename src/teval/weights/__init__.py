@@ -10,11 +10,15 @@ replaced without touching the validation and expansion rules.
 
 Submodules
 ----------
-reader   — read a weight file into a tidy, dtype-validated DataFrame
-resolve  — bind indices to formulation names, enforce the weight rules, and
-           expand per-nexus groups into a dense array over the run's features
+reader      — read a weight file into a tidy, dtype-validated DataFrame
+resolve     — bind indices to formulation names, enforce the weight rules,
+              and expand per-nexus groups into a dense array over the run's
+              features
+provenance  — the attributes recording, in the output file itself, whether
+              weighting was applied and how far it reached
 """
 
+from teval.weights.provenance import weighting_attrs
 from teval.weights.reader import read_weight_file
 from teval.weights.resolve import (
     CoverageReport,
@@ -29,4 +33,5 @@ __all__ = [
     "validate_weight_groups",
     "resolve_weights",
     "CoverageReport",
+    "weighting_attrs",
 ]
