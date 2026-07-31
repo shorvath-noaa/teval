@@ -765,6 +765,57 @@ def test_a_reused_ensemble_without_a_hydrofabric_warns_rather_than_aborts(
     ]
 
 
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        ({"raw_files": {}, "ensemble_file": None}, False),
+        ({"raw_files": {}}, False),
+        ({"raw_files": {}, "ensemble_file": Path("nowhere/absent.nc")}, False),
+    ],
+    ids=["no-file", "no-key", "named-but-absent"],
+)
+def test_the_reuse_predicate_answers_from_the_domain_map(entry, expected):
+    """
+    Only a file that is actually on disk counts as a reuse.
+
+    A named file that is missing falls through to the raw members, so the
+    statistics get built here after all -- and a run that builds them is a run
+    that needs the crosswalk.
+    """
+    assert workflow.reuses_precomputed_ensemble(entry) is expected
+
+
+def test_the_reuse_predicate_recognises_a_file_on_disk(precomputed_ensemble_file):
+    """The one case that is a reuse, so the parametrized cases mean something."""
+    assert workflow.reuses_precomputed_ensemble(
+        {"raw_files": {}, "ensemble_file": precomputed_ensemble_file}
+    ) is True
+
+
+def test_a_named_but_absent_ensemble_file_leaves_the_hydrofabric_guard_armed(
+    tmp_path, raw_files, weight_file, formulation_index_map, no_hydrofabric, caplog,
+):
+    """
+    Both guards read the same predicate, so they cannot disagree about a run.
+
+    Pointing at an ensemble file that was never written is not a bypass: the
+    formulation step falls through to the raw members and builds the statistics
+    itself, so the crosswalk really is needed and its absence is the accurate
+    complaint.  Were the two sites to drift on what counts as a reuse, this
+    configuration would slip past the error *and* draw no warning, and the run
+    would produce an unweighted mean with nothing said.
+    """
+    with caplog.at_level(logging.DEBUG, logger=WORKFLOW_LOGGER):
+        with pytest.raises(ValueError, match="no hydrofabric"):
+            workflow.load_domain_data(
+                _domain(raw_files, ensemble_file=tmp_path / "never_written.nc"),
+                IOConfig(),
+                _weighted_config(weight_file, formulation_index_map),
+            )
+
+    assert _bypass_warnings(caplog) == []
+
+
 def test_neither_guard_fires_on_a_normal_unweighted_run(
     raw_files, hydrofabric, caplog,
 ):

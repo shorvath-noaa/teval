@@ -55,6 +55,26 @@ def get_gage_fids(domain_data: Dict, viz_config: VizConfig) -> np.ndarray:
 
     return np.intersect1d(list(set(required_fids)), ds_stats.feature_id.values)
 
+
+def reuses_precomputed_ensemble(formulation_dict: Dict) -> bool:
+    """
+    Say whether this domain returns a pre-computed ensemble instead of building one.
+
+    Answered from the domain map alone, so it is known before anything is
+    loaded.  Both weighting guard rails turn on this one question -- the
+    missing-hydrofabric error is not applied to a domain that needs no
+    crosswalk, and the bypass warning is made for exactly the domains it is
+    not applied to -- and they must agree about a given run, which they can
+    only be relied on to do while they ask the same function.
+
+    A named file that is not on disk is not a reuse: ``_process_formulation_files``
+    falls through to the raw members and builds the statistics itself, so the
+    weighted path is live and the crosswalk is needed after all.
+    """
+    ensemble_file = formulation_dict.get("ensemble_file")
+    return bool(ensemble_file and ensemble_file.exists())
+
+
 # --------------------------------------------------------------------- #
 # Ensemble weights                                                      #
 # --------------------------------------------------------------------- #
@@ -107,7 +127,9 @@ def _prepare_weight_plan(
     crosswalk is built and ``build_stats`` is reached exactly as before.
 
     *reusing_ensemble* says this domain will return a pre-computed ensemble
-    rather than build statistics.  Such a run never consumes the crosswalk, so
+    rather than build statistics, as ``reuses_precomputed_ensemble`` answers it
+    -- the same call the bypass warning turns on, so the two guard rails cannot
+    reach opposite conclusions.  Such a run never consumes the crosswalk, so
     the missing-hydrofabric guard below is not applied to it: the accurate
     complaint there is that weighting is bypassed altogether, which
     ``_process_formulation_files`` makes loudly, and raising instead would
@@ -260,11 +282,10 @@ def load_domain_data(domain_dict: Dict, io: IOConfig, stats_config: StatsConfig)
     # Prepare Weights (no-op when stats.weights is absent).  Whether a
     # pre-computed ensemble will be reused is known from the domain map alone,
     # and it decides which of the two guard rails this configuration is under.
-    ensemble_file = domain_dict['formulations'].get('ensemble_file')
     weight_plan = _prepare_weight_plan(
         stats_config,
         results['hydrofabric'],
-        reusing_ensemble=bool(ensemble_file and ensemble_file.exists()),
+        reusing_ensemble=reuses_precomputed_ensemble(domain_dict['formulations']),
     )
 
     # Process Formulations
@@ -314,8 +335,10 @@ def _process_formulation_files(
     combined_ds = None
     t_min, t_max = None, None
 
-    # Load Pre-Computed Ensemble (if it exists)
-    if ensemble_file and ensemble_file.exists():
+    # Load Pre-Computed Ensemble (if it exists).  Asked through the shared
+    # predicate, since ``load_domain_data`` decided which guard rail this run is
+    # under by asking the same question of the same domain map entry.
+    if reuses_precomputed_ensemble(formulation_dict):
         logger.debug(f"Loading pre-computed ensemble from {ensemble_file.name}")
 
         ds_stats = xr.open_dataset(ensemble_file, engine="h5netcdf", chunks={'feature_id': 'auto'})
