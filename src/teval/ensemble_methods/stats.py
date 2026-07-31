@@ -10,19 +10,17 @@ NC write and gage extraction can be fused into a single pass.
 
 Weighting
 ---------
-When a weight array is supplied, **only the mean is weighted**.  The median
-and the lower/upper spread band stay unweighted, and this is deliberate
-rather than an omission.  A weighted mean is a well-defined linear
-combination of the members; a weighted quantile is not — it requires a choice
-of interpolation convention that changes the answer, and with the handful of
-members an ensemble here carries, the min/max spread band reduces to picking
-one member regardless of its weight.  Reporting them unweighted keeps them
-honest as a description of the raw member spread.  A downweighted member
-therefore still widens the band and still shifts the median, so the spread
-around a weighted mean is not the spread of the weighted combination.
+When a weight array is supplied, **only the mean is weighted**; the median and
+the lower/upper spread band stay unweighted, deliberately.  A weighted mean is
+a well-defined linear combination of the members; a weighted quantile is not —
+it needs an interpolation convention that changes the answer, and with the
+handful of members an ensemble here carries, the min/max band reduces to
+picking one member regardless of its weight.  Unweighted, they stay honest as
+a description of the raw member spread.
 
-The consequence worth stating plainly: with weights configured, ``_mean`` and
-``_median`` are no longer estimates of the same quantity, and the mean is not
+The consequence worth stating plainly: with weights configured, a downweighted
+member still widens the band and still shifts the median, so ``_mean`` and
+``_median`` are no longer estimates of the same quantity and the mean is not
 guaranteed to sit inside the spread band.
 
 Public API
@@ -114,20 +112,18 @@ def _weighted_mean(combined_ds: xr.Dataset, weights: xr.DataArray) -> xr.Dataset
     Combine members into a weighted mean over the formulation dimension.
 
     With groups that sum to 1 — which ``resolve_weights`` guarantees — this is
-    the weighted sum ``Σ wᵢ·xᵢ`` over members.  It is expressed as xarray's
-    weighted mean rather than as a literal ``(ds * w).sum()`` because of what
-    the two do with a missing member: a bare product-and-sum treats a NaN as a
-    zero contribution while still dividing by the full weight, biasing that
-    timestep low without any sign of it in the output.  The weighted mean
-    instead renormalizes over the members that are actually present, which is
-    what the unweighted ``.mean()`` already does with ``skipna``.  Equal
-    weights therefore reproduce the unweighted path exactly, gaps and all.
+    the weighted sum ``Σ wᵢ·xᵢ`` over members.  It is xarray's weighted mean
+    rather than a literal ``(ds * w).sum()`` because of what the two do with a
+    missing member: a bare product-and-sum treats a NaN as a zero contribution
+    while still dividing by the full weight, biasing that timestep low with no
+    sign of it in the output.  The weighted mean renormalizes over the members
+    actually present, as the unweighted ``.mean()`` already does with
+    ``skipna``, so equal weights reproduce the unweighted path exactly.
 
-    Lazy: xarray expresses this as a dot product over the formulation axis, so
-    the result stays dask-backed and nothing is read from disk here.  The
-    weight array itself is expected to be in memory (as ``resolve_weights``
-    returns it) — xarray screens it for missing values on construction, which
-    would otherwise force a compute of the weights alone.
+    Lazy: a dot product over the formulation axis, dask-backed, nothing read
+    from disk.  The weight array itself is expected to be in memory, as
+    ``resolve_weights`` returns it — xarray screens it for missing values on
+    construction, which would otherwise force a compute of the weights alone.
     """
     aligned = _align_weights(combined_ds, weights)
     logger.debug(
@@ -153,9 +149,8 @@ def build_stats(
 
     When *weights* is given the mean becomes a weighted combination over the
     formulation dimension; the median and the spread band are unweighted
-    either way, for the reasons set out in the module docstring.  When it is
-    omitted the function behaves exactly as it did before weighting existed —
-    the weighted branch is not reached and no alignment is attempted.
+    either way, for the reasons the module docstring sets out.  Omitted, the
+    weighted branch is not reached and no alignment is attempted.
 
     All operations are lazy — no data is read from disk until the caller
     triggers ``dask.compute()``.
@@ -201,8 +196,6 @@ def build_stats(
     # ------------------------------------------------------------------ #
     # Mean and median                                                      #
     # ------------------------------------------------------------------ #
-    # The median is taken over the raw members in both branches: only the
-    # mean is weighted.  See the module docstring.
     if weights is None:
         ds_mean = combined_ds.mean(dim="formulation", keep_attrs=True)
     else:

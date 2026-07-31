@@ -14,16 +14,15 @@ alone, without the run's configuration or its log:
     produced before weighting existed rather than by an unweighted run.
 ``ensemble_weight_file``
     The configured weight file, verbatim as the configuration named it.
-    Written only when weighting was applied.
 ``ensemble_weight_coverage_fraction``
     The fraction of the domain's features that carried weights the file
-    supplied; the remainder fell back to equal weights.  Written only when
-    weighting was applied.  A value below 1.0 is the signal that the mean is
-    weighted in part of the domain and plain in the rest.
+    supplied; the remainder fell back to equal weights.  Below 1.0 is the
+    signal that the mean is weighted in part of the domain and plain in the
+    rest.
 
-Values are strings and floats rather than booleans because NetCDF has no
-boolean attribute type; ``"true"``/``"false"`` survives the round trip
-through the file where a Python ``bool`` would not.
+The latter two are written only when weighting was applied.  All three are
+strings and floats rather than booleans because NetCDF has no boolean
+attribute type.
 
 Public API
 ----------
@@ -41,14 +40,12 @@ from typing import Any, Dict, Optional
 from teval.config import WeightsConfig
 from teval.weights.resolve import CoverageReport
 
-#: Whether the mean in this file is a weighted combination of the members.
+#: The attribute names, each described in the module docstring above.
 APPLIED_ATTR = "ensemble_weighting_applied"
-#: The weight file that produced it, when one did.
 FILE_ATTR = "ensemble_weight_file"
-#: How much of the domain that file actually reached.
 COVERAGE_ATTR = "ensemble_weight_coverage_fraction"
 
-#: The two values ``APPLIED_ATTR`` takes.  NetCDF has no boolean attribute.
+#: The two values ``APPLIED_ATTR`` takes.
 APPLIED_TRUE = "true"
 APPLIED_FALSE = "false"
 
@@ -56,21 +53,11 @@ APPLIED_FALSE = "false"
 @dataclass(frozen=True)
 class AppliedWeighting:
     """
-    What a weighted run applied: the configuration, and how far it reached.
+    The ``stats.weights`` block a run applied and the coverage it reached.
 
-    The two describe one event between them, and the resolution step produces
-    them together, so they travel as one value.  A run then either has this or
-    has ``None``, and there is no way to hold half of it -- which is what lets
-    an unweighted run be a single absent argument rather than two absences a
-    caller has to keep in agreement.
-
-    Attributes
-    ----------
-    config:
-        The ``stats.weights`` block that was applied.
-    report:
-        The coverage the resolution achieved, as ``resolve_weights`` returned
-        it.
+    Resolution produces the two together and they describe one event between
+    them, so they travel as one value: a run either has this or has ``None``,
+    and cannot hold half of it.
     """
 
     config: WeightsConfig
@@ -79,22 +66,12 @@ class AppliedWeighting:
 
 def weighting_attrs(applied: Optional[AppliedWeighting] = None) -> Dict[str, Any]:
     """
-    Build the provenance attributes describing how the mean was combined.
+    Build the provenance attributes for a run, weighted (*applied*) or not.
 
-    Parameters
-    ----------
-    applied:
-        The weighting this run applied, or ``None`` for an unweighted run.
-
-    Returns
-    -------
-    dict
-        ``{APPLIED_ATTR: "false"}`` for an unweighted run; that key set to
-        ``"true"`` alongside ``FILE_ATTR`` and ``COVERAGE_ATTR`` for a
-        weighted one.  The file path and the coverage fraction are omitted
-        rather than zero-filled when nothing was applied, since a recorded
-        coverage of 0.0 would read as "weighting was attempted and reached
-        nothing", which is a different — and much worse — outcome.
+    An unweighted run records only that it was unweighted: the file and the
+    coverage are omitted rather than zero-filled, since a recorded coverage of
+    0.0 would read as "weighting was attempted and reached nothing", a
+    different and much worse outcome.
     """
     if applied is None:
         return {APPLIED_ATTR: APPLIED_FALSE}

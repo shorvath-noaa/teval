@@ -135,12 +135,10 @@ def build_nexus_crosswalk(
     frame that has already been loaded, so this reads no file and adds no
     GeoPackage access to a run.
 
-    The nexus keys come from ``toid`` and the feature ids from the frame's
-    index, and the two are never crossed; that separation is the point of the
-    function, for the reason :func:`teval.identifiers.as_identifiers` gives.
-    Both columns are reduced by that same function, which is also what the
-    resolver applies to the weight file's nexus ids, so the two sides of that
-    join cannot normalize differently.
+    Nexus keys come from ``toid`` and feature ids from the frame's index, and
+    the two are never crossed; both are reduced by
+    :func:`teval.identifiers.as_identifiers`, whose docstring gives the reason
+    for each.
 
     Parameters
     ----------

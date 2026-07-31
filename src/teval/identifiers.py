@@ -1,20 +1,14 @@
 """
 teval.identifiers
 
-Reduce NextGen identifiers to the integer form the hydrofabric stores.
-
-Everything that has to be matched against the hydrofabric — the nexus
-crosswalk built from its flowpaths, and the weight file joined against that
-crosswalk — shares the one reduction here rather than writing its own, so no
-two sides of a join can normalize differently.  :func:`as_identifiers` states
-what the reduction does and why, and is the single place that rationale is
-kept.
+The one reduction of NextGen identifiers, and the one way errors name them.
 
 Public API
 ----------
-as_identifiers(values, context)
+as_identifiers(values, context, required=False)
     Reduce an identifier column to numbers, with NA where an entry carries no
-    identifier at all.
+    identifier at all.  Its docstring holds the rationale every caller relies
+    on, including why they all have to come through here.
 describe(items)
     Render offending values as a short, truncated list for an error message.
 """
@@ -41,9 +35,8 @@ def describe(items) -> str:
     """
     Render a collection as a short, truncated list for an error message.
 
-    Shared by every module that names what it is rejecting -- identifiers,
-    formulation names, row positions -- so one bad file reads the same way
-    wherever it was caught.
+    Used by every module that names what it is rejecting, so one bad file
+    reads the same way wherever it was caught.
     """
     listed = list(items)[:MAX_REPORTED]
     text = ", ".join(str(item) for item in listed)
@@ -59,27 +52,22 @@ def as_identifiers(
     """
     Reduce an identifier column to the integer form the hydrofabric stores.
 
-    ``load_hydrofabric`` strips the ``wb-`` and ``nex-`` prefixes from ``id``
-    and ``toid``, so a frame that has been through it carries plain integers
-    and ``nex-9001`` is stored as ``9001``.  A frame or a weight file built by
-    other means may still hold the prefixed strings, so both are accepted and
-    reduced identically here — anything matched against the hydrofabric reduces
-    through this function, or one side of a join normalizes differently from
-    the other and the join silently finds nothing.
+    ``load_hydrofabric`` strips the ``wb-`` and ``nex-`` prefixes, so a frame
+    that has been through it stores ``nex-9001`` as ``9001``, while a weight
+    file or a frame built by other means may still hold the prefixed string.
+    Both are accepted and reduced identically, and every side of a join comes
+    through here: two sides normalizing differently is a join that silently
+    finds nothing.
 
-    The prefix is what tells the two kinds of identifier apart, which is why
-    callers keep the prefixed spelling for as long as they can and never cross
-    a nexus column with a flowpath one: once the prefix is gone, ``nex-123456``
-    and ``wb-123456`` are the same number, so a join against the wrong column
-    returns silently wrong weights rather than failing.
+    The prefix is what tells a nexus from a flowpath, which is why callers keep
+    it for as long as they can and never cross the two columns — once it is
+    gone ``nex-123456`` and ``wb-123456`` are the same number, so a join
+    against the wrong one returns silently wrong weights rather than failing.
 
-    The reduction is numeric-first: a value that reads as a number is taken as
-    that number, and only a genuinely non-numeric entry is digit-stripped.  The
-    order matters.  Digit-stripping first would turn the string ``"9001.0"`` —
-    what ``pandas`` produces from a float column, and therefore what an ordinary
-    weight file yields when its ``nexus_id`` column lands as float dtype — into
-    ``90010`` by swallowing the decimal point, giving a nexus id that matches
-    nothing.
+    The reduction is numeric-first, and that order matters: digit-stripping
+    first would swallow the decimal point in ``"9001.0"`` — which is what
+    ``pandas`` renders from a float ``nexus_id`` column, and so how an ordinary
+    weight file arrives — and give ``90010``, an id that matches nothing.
 
     Parameters
     ----------
@@ -100,9 +88,8 @@ def as_identifiers(
     pd.Series
         Float series, positionally aligned with ``values``, carrying NA where
         an identifier is missing or holds no digits at all unless *required*.
-        Float rather than int because NA is representable in it; an id above
-        2^53 spelled as a string would therefore lose precision, which no
-        NextGen identifier is close to reaching.
+        Float because NA is representable in it, so an id above 2^53 spelled
+        as a string loses precision — no NextGen identifier comes close.
 
     Raises
     ------
@@ -111,9 +98,8 @@ def as_identifiers(
         a hydrofabric identifier, or — with *required* — an entry that reduces
         to nothing.
     """
-    # Booleans are checked by value and not only by dtype: an object column
-    # holding True is not bool-dtyped, and True is an int in Python, so it
-    # would otherwise reduce silently to identifier 1.
+    # By value and not only by dtype: an object column holding True is not
+    # bool-dtyped, and True is an int in Python, so it would key identifier 1.
     if pd.api.types.is_bool_dtype(values):
         booleans = list(values)
     else:
@@ -148,11 +134,12 @@ def as_identifiers(
             f"hydrofabric identifiers are integers."
         )
 
-    unreadable = numeric.isna()
-    if required and unreadable.any():
-        raise ValueError(
-            f"{context} carries no digits and cannot be matched against the "
-            f"hydrofabric's integer identifiers: "
-            f"{describe([repr(v) for v in values[unreadable]])}."
-        )
+    if required:
+        unreadable = numeric.isna()
+        if unreadable.any():
+            raise ValueError(
+                f"{context} carries no digits and cannot be matched against "
+                f"the hydrofabric's integer identifiers: "
+                f"{describe([repr(v) for v in values[unreadable]])}."
+            )
     return numeric

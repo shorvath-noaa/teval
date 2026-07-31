@@ -339,11 +339,8 @@ def validate_weight_groups(
     Raises
     ------
     ValueError
-        The index map does not name exactly the run's formulations, the frame
-        is missing a schema column or carries values of the wrong type, a row
-        uses an index the map does not define, a group is incomplete or
-        duplicated, a weight is negative or non-finite, a group is entirely
-        zero, or a group does not sum to 1 and ``normalize`` is False.
+        Any rule in the module docstring's table fails, or the frame is
+        missing a schema column or carries values of the wrong type.
     """
     _require_legend_matches_run(formulation_index_map, formulations)
     tidy = _as_tidy_frame(weights)
@@ -659,12 +656,8 @@ def resolve_weights(
 
     Parameters
     ----------
-    weights:
-        Tidy weight frame as ``read_weight_file`` returns it.
-    formulation_index_map:
-        Binding from weight-file index to formulation name.
-    formulations:
-        The formulation names discovered in the run, in dataset order.
+    weights, formulation_index_map, formulations, normalize, tolerance:
+        As :func:`validate_weight_groups` takes them.
     nexus_to_features:
         Mapping from nexus to the feature ids draining to it, as the
         hydrofabric crosswalk builder returns it.  Nexus ids may be integers
@@ -672,13 +665,9 @@ def resolve_weights(
     feature_ids:
         The run's feature ids, in dataset order.  These become the returned
         array's ``feature_id`` coordinate.
-    normalize:
-        Divide each group by its own sum instead of requiring it to sum to 1.
     on_missing:
         ``'warn'`` (default) fills uncovered features with equal weights and
         logs the coverage; ``'error'`` raises instead.
-    tolerance:
-        How far a group's sum may sit from 1.0 when ``normalize`` is False.
 
     Returns
     -------
