@@ -3,19 +3,26 @@ Shared pytest fixtures for the teval test suite.
 
 The fixtures here provide the small synthetic inputs the ensemble machinery
 operates on: a combined dataset carrying a ``formulation`` dimension, a
-minimal flowpaths frame in the shape ``load_hydrofabric`` returns, and a tidy
-weight frame in the provisional weight-file schema.
+minimal flowpaths frame in the shape ``load_hydrofabric`` returns, a tidy
+weight frame in the provisional weight-file schema, and the same inputs
+written to disk for the tests that drive ``load_domain_data`` end to end.
 
 All values are chosen to be hand-checkable so tests can assert against
 expectations worked out on paper rather than against a second implementation.
+Everything describing the same synthetic domain lives here so the several
+weighting test modules cannot drift apart on what that domain is; the plain
+helper functions they share are in ``weighting_support.py``.
 """
 
 from __future__ import annotations
 
+import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pytest
 import xarray as xr
+
+from teval import workflow
 
 
 # --------------------------------------------------------------------- #
@@ -119,4 +126,83 @@ def weight_frame():
             "formulation_index": [1, 2, 3, 1, 2, 3],
             "weight": [0.5, 0.3, 0.2, 0.25, 0.75, 0.0],
         }
+    )
+
+
+@pytest.fixture
+def crosswalk():
+    """
+    Nexus to draining features, matching the ``flowpaths_frame`` fixture.
+
+    Features 101, 102 and 103 converge on nexus 9001 — the confluence that
+    makes the relationship genuinely many-to-one — and 201 drains to 9002.
+    Built here rather than derived from the hydrofabric so the resolver is
+    tested against the crosswalk *contract*, not against a second module.
+    """
+    return {9001: [101, 102, 103], 9002: [201]}
+
+
+@pytest.fixture
+def one_nexus_crosswalk():
+    """Crosswalk covering only the confluence, leaving 201 uncovered."""
+    return {9001: [101, 102, 103]}
+
+
+# --------------------------------------------------------------------- #
+# The same domain, on disk                                              #
+# --------------------------------------------------------------------- #
+@pytest.fixture
+def raw_files(tmp_path, combined_ds, formulation_names):
+    """The synthetic ensemble written out as one NetCDF per formulation."""
+    files = {}
+    for name in formulation_names:
+        path = tmp_path / f"{name}.nc"
+        combined_ds.sel(formulation=name).drop_vars("formulation").to_netcdf(
+            path, engine="h5netcdf"
+        )
+        files[name] = path
+    return files
+
+
+@pytest.fixture
+def weight_file(tmp_path, weight_frame):
+    """The tidy weight frame written out in the provisional csv schema."""
+    path = tmp_path / "weights.csv"
+    weight_frame.to_csv(path, index=False)
+    return path
+
+
+@pytest.fixture
+def partial_weight_file(tmp_path, weight_frame):
+    """A weight file covering nexus 9001 only, leaving feature 201 uncovered."""
+    path = tmp_path / "partial_weights.csv"
+    weight_frame[weight_frame["nexus_id"] == "nex-9001"].to_csv(path, index=False)
+    return path
+
+
+@pytest.fixture
+def hydrofabric(monkeypatch, flowpaths_frame):
+    """
+    Stand in for ``load_hydrofabric`` with the synthetic flowpaths frame.
+
+    Only the frame matters here — the crosswalk is derived from its ``toid``
+    column — so the gage structures are returned empty.  Patching the loader
+    rather than writing a GeoPackage keeps this about the wiring; reading a
+    ``.gpkg`` is ``teval.io.hydrofabric``'s own concern.
+    """
+    monkeypatch.setattr(
+        workflow,
+        "load_hydrofabric",
+        lambda gpkg_path: (flowpaths_frame, [], {}, {}),
+    )
+    return flowpaths_frame
+
+
+@pytest.fixture
+def no_hydrofabric(monkeypatch):
+    """A domain with no hydrofabric at all, so no crosswalk can be built."""
+    monkeypatch.setattr(
+        workflow,
+        "load_hydrofabric",
+        lambda gpkg_path: (gpd.GeoDataFrame(), [], {}, {}),
     )
