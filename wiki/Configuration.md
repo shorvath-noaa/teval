@@ -176,10 +176,14 @@ The achieved coverage fraction is written into the output NetCDF — see
 - **A hydrofabric is required.** The per-nexus weights are joined to features
   through a crosswalk derived from the hydrofabric's flowpaths, so a domain
   with no hydrofabric aborts the run with an explicit error rather than
-  quietly falling back to the unweighted mean. Note that a hydrofabric is only
-  loaded when `metrics.enabled` or `viz.interactive_map.enabled` is set, so
-  switching both off leaves every domain without one even when
-  `io.hydrofabric_dir` holds a perfectly good GeoPackage.
+  quietly falling back to the unweighted mean.
+
+  **When teval loads a hydrofabric.** Only when `metrics.enabled` or
+  `viz.interactive_map.enabled` is set — nothing else reads
+  `io.hydrofabric_dir`. Switching both off therefore leaves every domain
+  without a hydrofabric even when that directory holds a perfectly good
+  GeoPackage, which is the usual cause of the error above in a run whose
+  configuration otherwise looks complete.
 - **`stats.weights` is global while the hydrofabric is per-domain.** A single
   hydrofabric-less domain therefore aborts a whole multi-domain run. This is
   intended: a weighted run that silently produced unweighted output for some

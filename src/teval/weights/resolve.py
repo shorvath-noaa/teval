@@ -8,60 +8,27 @@ features.
 
 This module is a pure function of plain inputs — DataFrames, dicts and
 sequences.  It reads no file, opens no GeoPackage and touches no xarray
-Dataset, so every rule below is testable without any of them.  Reading the
-file is ``teval.weights.reader``'s job; that module owns the provisional file
-format and this one owns the meaning, so a format change leaves these rules
-intact.
+Dataset, so every rule here is testable without any of them, and everything —
+validation *and* coverage — is decided before a Dask graph exists: a weight
+file that cannot be applied fails in the first second of a run rather than
+after a long compute.  Reading the file is ``teval.weights.reader``'s job;
+that module owns the provisional file format and this one owns the meaning, so
+a format change leaves these rules intact.
 
-Because nothing here touches data, everything — validation *and* coverage —
-is decided before a Dask graph exists.  A weight file that cannot be applied
-therefore fails in the first second of a run rather than after a long compute.
+Each rule is stated once, in the docstring of the function that enforces it:
 
-The file's ``formulation_index`` is a file-format detail and does not survive
-past the first step here: rows are relabelled to formulation names once, at
-the top of :func:`validate_weight_groups`, and every rule below is expressed
-and reported in name space, which is what a user reading an error message can
-act on.
-
-Rules enforced here
--------------------
-Legend
-    ``formulation_index_map`` must name exactly the formulations discovered in
-    the run.  A name the map supplies that the run does not have is a stale
-    legend; a formulation in the run that the map does not name would silently
-    drop a member from the product.  One set comparison decides both.
-Group completeness
-    A nexus with any rows at all must carry exactly one row per formulation in
-    the run.  A missing row would drop one member at one location; a duplicate
-    row is the signature of two weight files concatenated by accident.  Both
-    are hard errors and neither is configurable.  A nexus with *no* rows is
-    not an error here — that is coverage, governed by ``on_missing``.
-Sign
-    Negative weights are an error, so a sign error upstream cannot produce a
-    physically meaningless combination.
-All-zero groups
-    A group whose weights are all zero is an error — that location would
-    silently produce zero flow.  An individual zero inside an otherwise
-    non-zero group is permitted and meaningful: it excludes one formulation at
-    one location deliberately.
-Sums
-    Each group must sum to 1 within ``SUM_TOLERANCE`` so float representation
-    error does not reject a legitimate file.  With ``normalize`` set, each
-    group is divided by its sum instead, accepting any positive scale.
+=========================== ======================================
+Legend                      :func:`_require_legend_matches_run`
+Relabelling to name space   :func:`_relabel`
+Group completeness          :func:`_require_complete_groups`
+Sign and finiteness         :func:`_require_valid_weight_values`
+All-zero groups and sums    :func:`_apply_sum_rule`
+Nexus-to-feature expansion  :func:`_expand_to_features`
+Coverage and ``on_missing`` :func:`_apply_coverage_policy`
+=========================== ======================================
 
 Every failure raises ``ValueError`` naming the offending nexus ids, so a bad
 file is diagnosable from the message without reading the source.
-
-Expansion and coverage
-----------------------
-Weights are keyed by nexus; the ensemble dataset is indexed by ``feature_id``.
-The relationship is many-to-one — several flowpaths may converge on one nexus
-— so a nexus' group broadcasts unchanged to every feature draining to it.
-
-A feature whose nexus carries no weights is *uncovered*, and ``on_missing``
-decides what that means: ``warn`` gives it equal weights (which is exactly the
-simple mean, so an uncovered feature behaves as it did before weighting was
-configured) and logs the counts and the coverage fraction; ``error`` aborts.
 
 Public API
 ----------
@@ -351,9 +318,7 @@ def validate_weight_groups(
     """
     Relabel, validate and normalize the weight groups in a tidy weight frame.
 
-    Pure: plain frames and dicts in, a plain frame out.  No file is read and
-    no dataset is touched, so this runs before any Dask graph is built and a
-    bad weight file fails before the expensive compute.
+    Pure: plain frames and dicts in, a plain frame out.
 
     Parameters
     ----------
@@ -475,15 +440,10 @@ def _nexus_keys(values: Iterable, context: str) -> np.ndarray:
     """
     Reduce nexus identifiers to the integers the hydrofabric's ``toid`` carries.
 
-    ``load_hydrofabric`` strips non-digits from ``toid``, so ``nex-9001``
-    becomes ``9001``.  Weight-file nexus ids keep whatever spelling the file
-    used.  The reduction itself is
-    :func:`teval.identifiers.as_identifiers` — the same one
-    ``build_nexus_crosswalk`` applies to the hydrofabric — so the two sides of
-    the join cannot normalize differently.  The hazard being guarded is that
-    after stripping, a nexus id and a flowpath id are indistinguishable by
-    value, and a join against the wrong column would return silently wrong
-    weights rather than raise.
+    Weight-file nexus ids keep whatever spelling the file used, so they are
+    reduced by :func:`teval.identifiers.as_identifiers` — the same one
+    ``build_nexus_crosswalk`` applies to the hydrofabric, and the same
+    docstring that says what the prefix is for.
 
     Nothing here is guessed at.  An identifier that carries no digits, or that
     is not integral, raises rather than being reduced to something plausible:
@@ -736,9 +696,7 @@ def resolve_weights(
     nexus group across every feature draining to that nexus, fills uncovered
     features with equal weights, and applies the ``on_missing`` coverage
     policy.  Pure: plain frames, dicts and sequences in; a labelled array and
-    a report out.  No file is read and no dataset is touched, so both the
-    validation errors and the coverage error are raised before any Dask graph
-    is built.
+    a report out.
 
     Parameters
     ----------

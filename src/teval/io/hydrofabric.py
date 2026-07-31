@@ -136,15 +136,11 @@ def build_nexus_crosswalk(
     GeoPackage access to a run.
 
     The nexus keys come from ``toid`` and the feature ids from the frame's
-    index, and the two are never crossed.  That separation is the point of the
-    function: ``load_hydrofabric`` strips the ``wb-`` and ``nex-`` prefixes, so
-    afterwards a nexus number and a flowpath id are indistinguishable by value
-    and a mapping built from the wrong column would return silently wrong
-    weights rather than fail.
-
-    Both columns are reduced by :func:`teval.identifiers.as_identifiers`, the
-    same reduction the resolver applies to the weight file's nexus ids, so the
-    two sides of that join cannot normalize differently.
+    index, and the two are never crossed; that separation is the point of the
+    function, for the reason :func:`teval.identifiers.as_identifiers` gives.
+    Both columns are reduced by that same function, which is also what the
+    resolver applies to the weight file's nexus ids, so the two sides of that
+    join cannot normalize differently.
 
     Parameters
     ----------

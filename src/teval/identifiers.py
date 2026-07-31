@@ -3,20 +3,12 @@ teval.identifiers
 
 Reduce NextGen identifiers to the integer form the hydrofabric stores.
 
-``load_hydrofabric`` strips the ``wb-`` and ``nex-`` prefixes from the
-flowpaths frame, so ``nex-9001`` becomes ``9001``.  Anything that has to be
-matched against that frame — the nexus crosswalk built from it, and the weight
-file joined against the crosswalk — must reduce identifiers the *same* way, or
-one side of a join normalizes differently from the other and the join silently
-finds nothing.  This module exists so there is one reduction to share rather
-than one per caller.
-
-The reduction is numeric-first: a value that reads as a number is taken as
-that number, and only a genuinely non-numeric value is digit-stripped.  The
-order matters.  Digit-stripping first would turn the string ``"9001.0"`` — what
-``pandas`` produces from a float column, and therefore what an ordinary weight
-file yields when its ``nexus_id`` column lands as float dtype — into ``90010``
-by swallowing the decimal point, giving a nexus id that matches nothing.
+Everything that has to be matched against the hydrofabric — the nexus
+crosswalk built from its flowpaths, and the weight file joined against that
+crosswalk — shares the one reduction here rather than writing its own, so no
+two sides of a join can normalize differently.  :func:`as_identifiers` states
+what the reduction does and why, and is the single place that rationale is
+kept.
 
 Public API
 ----------
@@ -42,15 +34,27 @@ def as_identifiers(values: pd.Series, context: str) -> pd.Series:
     """
     Reduce an identifier column to the integer form the hydrofabric stores.
 
-    ``load_hydrofabric`` already strips non-digits from ``id`` and ``toid``, so
-    a frame that has been through it carries plain integers.  A frame or a
-    weight file built by other means may still hold the prefixed strings
-    (``nex-9001``), so both are accepted and reduced identically.
+    ``load_hydrofabric`` strips the ``wb-`` and ``nex-`` prefixes from ``id``
+    and ``toid``, so a frame that has been through it carries plain integers
+    and ``nex-9001`` is stored as ``9001``.  A frame or a weight file built by
+    other means may still hold the prefixed strings, so both are accepted and
+    reduced identically here — anything matched against the hydrofabric reduces
+    through this function, or one side of a join normalizes differently from
+    the other and the join silently finds nothing.
 
-    Numeric values are read as numbers first and only genuinely non-numeric
-    entries are digit-stripped, so a float ``9001.0`` — or the string
-    ``"9001.0"`` a float column becomes when cast to ``str`` — cannot be read
-    as ``90010`` by having its decimal point removed.
+    The prefix is what tells the two kinds of identifier apart, which is why
+    callers keep the prefixed spelling for as long as they can and never cross
+    a nexus column with a flowpath one: once the prefix is gone, ``nex-123456``
+    and ``wb-123456`` are the same number, so a join against the wrong column
+    returns silently wrong weights rather than failing.
+
+    The reduction is numeric-first: a value that reads as a number is taken as
+    that number, and only a genuinely non-numeric entry is digit-stripped.  The
+    order matters.  Digit-stripping first would turn the string ``"9001.0"`` —
+    what ``pandas`` produces from a float column, and therefore what an ordinary
+    weight file yields when its ``nexus_id`` column lands as float dtype — into
+    ``90010`` by swallowing the decimal point, giving a nexus id that matches
+    nothing.
 
     Parameters
     ----------

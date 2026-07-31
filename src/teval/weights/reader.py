@@ -111,16 +111,12 @@ def _coerce_nexus_id(values: pd.Series, file_path: Path) -> pd.Series:
     """
     Coerce nexus identifiers to stripped strings.
 
-    The ``nex-`` prefix is deliberately preserved rather than stripped to an
-    integer: after prefix stripping ``nex-123456`` and ``wb-123456`` are the
-    same value, so a nexus identifier would become indistinguishable from a
-    flowpath identifier and a join on the wrong column would fail silently.
-
-    A column of unprefixed ids lands as a numeric dtype, and ``astype(str)``
-    then spells it ``"9001.0"``.  That is left as it is rather than special-
-    cased here: reducing an identifier for the join is
-    :func:`teval.identifiers.as_identifiers`' job, and it reads such a value as
-    a number before considering its digits, so ``"9001.0"`` matches nexus 9001.
+    The ``nex-`` prefix is deliberately preserved rather than reduced to an
+    integer here, and a float-dtype column of unprefixed ids is left spelled
+    ``"9001.0"``, as ``astype(str)`` renders it.  Reducing an identifier for the
+    join is :func:`teval.identifiers.as_identifiers`' job, and its docstring
+    says why the prefixed spelling is worth carrying this far and why that
+    ``"9001.0"`` needs no special case.
     """
     nexus_id = values.astype(str).str.strip()
 

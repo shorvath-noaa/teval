@@ -159,16 +159,11 @@ def _prepare_weight_plan(
     if not reusing_ensemble and (gdf_hydro is None or len(gdf_hydro) == 0):
         raise ValueError(
             f"Ensemble weights are configured (stats.weights.file="
-            f"{weights_config.file}), but this domain has no hydrofabric. "
-            f"Weights are supplied per nexus while the ensemble is indexed by "
-            f"feature_id, and the nexus-to-feature crosswalk is derived from "
-            f"the hydrofabric's flowpaths, so without one no weight can be "
-            f"placed on any feature. Supply this domain's hydrofabric "
-            f"GeoPackage, or remove the stats.weights block to run unweighted. "
-            f"Note that teval only looks for hydrofabrics when metrics or the "
-            f"interactive map are enabled, so a GeoPackage sitting in "
-            f"io.hydrofabric_dir is not loaded for a run with both switched "
-            f"off."
+            f"{weights_config.file}), but this domain has no hydrofabric, so "
+            f"the nexus-to-feature crosswalk the weights are joined through "
+            f"cannot be built. Supply this domain's hydrofabric GeoPackage, or "
+            f"remove the stats.weights block to run unweighted. See the "
+            f"stats.weights documentation for when teval loads a hydrofabric."
         )
 
     frame = read_weight_file(weights_config.file)
