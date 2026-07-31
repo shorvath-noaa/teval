@@ -166,10 +166,11 @@ def _resolve_domain_weights(
     Resolve the plan against the run's formulations and feature ids.
 
     Called once per domain, from the formulation step, as soon as the combined
-    dataset exists and before its statistics graph is built.  The formulation
-    names come from the dataset's own coordinate rather than from the raw file
-    dict, so the returned array is labelled with exactly what ``build_stats``
-    will match it against.
+    dataset exists and before its statistics graph is built.  Both axes are
+    taken from the dataset's own coordinates, unconverted -- the formulation
+    names rather than the raw file dict's keys, and the feature ids as they
+    stand -- so the returned array is labelled with exactly what
+    ``build_stats`` will match it against, and the two cannot drift.
 
     The coverage report comes back alongside the weights rather than being
     logged and dropped, because the achieved coverage is written into the
@@ -199,7 +200,7 @@ def _resolve_domain_weights(
     weights, report = resolve_weights(
         plan.frame,
         plan.config.formulation_index_map,
-        [str(name) for name in combined_ds["formulation"].values],
+        combined_ds["formulation"].values,
         plan.crosswalk,
         combined_ds["feature_id"].values,
         normalize=plan.config.normalize,

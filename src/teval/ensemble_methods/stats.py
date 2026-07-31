@@ -47,35 +47,66 @@ from teval.config import StatsConfig
 logger = logging.getLogger(__name__)
 
 
+def _require_matching_labels(
+    axis: str,
+    ds_labels: pd.Index,
+    weight_labels: pd.Index,
+) -> None:
+    """
+    Require a weight axis to carry exactly the dataset's labels, in any order.
+
+    Equality on both axes, not something looser on either.  xarray arithmetic
+    joins on the *intersection* of coordinates, so an array short of one label
+    would silently drop that row and the run would finish, writing a product
+    quietly short of rows; one carrying a label the run does not have was
+    resolved against some other dataset.  Neither has a reconciliation worth
+    guessing at, and both directions are reported together so an array wrong
+    in both takes one run to diagnose.
+    """
+    missing = ds_labels.difference(weight_labels)
+    unexpected = weight_labels.difference(ds_labels)
+    if not len(missing) and not len(unexpected):
+        return
+
+    problems = []
+    if len(missing):
+        problems.append(
+            f"weights omit {len(missing)} of the dataset's {len(ds_labels)}, "
+            f"e.g. {list(missing[:10])}"
+        )
+    if len(unexpected):
+        problems.append(
+            f"weights carry {len(unexpected)} label(s) the dataset does not, "
+            f"e.g. {list(unexpected[:10])}"
+        )
+    raise ValueError(
+        f"weights do not carry exactly the dataset's '{axis}' labels: "
+        + "; ".join(problems)
+        + ". resolve_weights builds both axes from the dataset it is resolved "
+        "against, so a mismatch means these weights are not this run's."
+    )
+
+
 def _align_weights(combined_ds: xr.Dataset, weights: xr.DataArray) -> xr.DataArray:
     """
     Check a weight array against the dataset and select it onto the dataset's labels.
 
-    xarray arithmetic joins on the *intersection* of coordinates, so a weight
-    array that is missing a feature the dataset carries would silently drop
-    that feature from the output rather than fail — the run would finish and
-    write a product quietly short of rows.  Alignment is therefore done here,
-    explicitly and up front, instead of being left to the reduction.
-
-    The two axes are held to different standards, because they play different
-    roles in the arithmetic:
-
-    ``formulation``
-        Must match the dataset exactly, as a set.  This is the axis being
-        reduced, so a weight array carrying a formulation the run does not
-        have would leave the selected weights summing to less than 1 and bias
-        the mean low, with nothing in the result to show for it.
-    every other dimension (in practice ``feature_id``)
-        Must be a *superset* of the dataset's labels.  These only label rows
-        of independent weight groups, so extra ones are harmless and are
-        dropped; missing ones are the silent-shrink hazard above.
+    ``resolve_weights`` builds both of its coordinates from the very dataset
+    the weights are then applied to, so in a real run the two agree by
+    construction and the ``.sel`` below is a no-op.  What is asserted here is
+    that the producer did what it claims — a labelled array over exactly this
+    run's ``(feature_id, formulation)``, the only shape it produces — rather
+    than that mismatched inputs can be reconciled.  The selection is kept so
+    that matching stays by label and never by position: the ``formulation``
+    axis follows directory scan order, and a silent transposition there would
+    swap members.
 
     Parameters
     ----------
     combined_ds:
         The lazy ensemble dataset the weights will be applied to.
     weights:
-        Weight array carrying a ``formulation`` dimension, as
+        Weight array over ``(feature_id, formulation)``, as
         ``teval.weights.resolve.resolve_weights`` returns it.
 
     Returns
@@ -89,59 +120,32 @@ def _align_weights(combined_ds: xr.Dataset, weights: xr.DataArray) -> xr.DataArr
     TypeError
         *weights* is not an ``xr.DataArray``.
     ValueError
-        The formulation axis is absent, unlabelled or does not match the
-        dataset's, or a weight dimension omits labels the dataset carries.
+        *weights* omits either axis, the dataset does not label one of them,
+        or an axis does not carry exactly the dataset's labels.
     """
     if not isinstance(weights, xr.DataArray):
         raise TypeError(
             f"weights must be an xr.DataArray over (feature_id, formulation), "
             f"as resolve_weights returns; got {type(weights).__name__}."
         )
-    if "formulation" not in weights.dims:
-        raise ValueError(
-            f"weights must carry a 'formulation' dimension to be combined over; "
-            f"got dimensions {tuple(weights.dims)}."
-        )
-    if "formulation" not in combined_ds.coords:
-        raise ValueError(
-            "The ensemble dataset has no 'formulation' coordinate, so weights "
-            "cannot be matched to members by name. Assign formulation names "
-            "before building weighted statistics."
-        )
 
-    ds_members = pd.Index(combined_ds["formulation"].values)
-    weight_members = pd.Index(weights["formulation"].values)
-    unweighted = ds_members.difference(weight_members)
-    unknown = weight_members.difference(ds_members)
-    if len(unweighted) or len(unknown):
-        raise ValueError(
-            f"weights do not cover exactly the run's formulations. The run has "
-            f"{list(ds_members)} and the weights carry {list(weight_members)}"
-            + (f"; missing {list(unweighted)}" if len(unweighted) else "")
-            + (f"; unexpected {list(unknown)}" if len(unknown) else "")
-            + ". Every member must carry a weight, or the mean would be a "
-            "combination of a subset that no longer sums to 1."
-        )
-
-    selection = {"formulation": ds_members.to_numpy()}
-    for dim in weights.dims:
-        if dim == "formulation":
-            continue
-        if dim not in combined_ds.coords:
+    selection = {}
+    for axis in ("formulation", "feature_id"):
+        if axis not in weights.dims:
             raise ValueError(
-                f"weights carry a '{dim}' dimension that the ensemble dataset "
-                f"does not label, so the two cannot be matched."
+                f"weights must carry a '{axis}' dimension — resolve_weights "
+                f"returns them over (feature_id, formulation); got dimensions "
+                f"{tuple(weights.dims)}."
             )
-        ds_labels = pd.Index(combined_ds[dim].values)
-        absent = ds_labels.difference(pd.Index(weights[dim].values))
-        if len(absent):
-            shown = list(absent[:10])
+        if axis not in combined_ds.coords:
             raise ValueError(
-                f"weights omit {len(absent)} of the dataset's {len(ds_labels)} "
-                f"'{dim}' label(s), e.g. {shown}. Weighting them would silently "
-                f"drop those rows from the output instead of failing."
+                f"The ensemble dataset has no '{axis}' coordinate, so weights "
+                f"cannot be matched to it by label. Assign {axis} labels "
+                f"before building weighted statistics."
             )
-        selection[dim] = ds_labels.to_numpy()
+        ds_labels = pd.Index(combined_ds[axis].values)
+        _require_matching_labels(axis, ds_labels, pd.Index(weights[axis].values))
+        selection[axis] = ds_labels.to_numpy()
 
     return weights.sel(selection)
 
@@ -227,8 +231,8 @@ def build_stats(
     TypeError
         *weights* is given but is not an ``xr.DataArray``.
     ValueError
-        *weights* is given but does not cover exactly the run's formulations,
-        or omits a label the dataset carries on another dimension.
+        *weights* is given but is not over exactly this run's ``feature_id``
+        and ``formulation`` labels.
     """
     logger.debug("Setting up lazy ensemble statistics calculations...")
 

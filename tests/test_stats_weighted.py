@@ -257,36 +257,6 @@ def test_weights_are_matched_by_label_not_by_position(
     np.testing.assert_array_equal(mean_values(in_order), mean_values(permuted))
 
 
-def test_extra_feature_ids_in_the_weights_are_dropped(
-    combined_ds, raw_files, stats_config, feature_ids, formulation_names, weights
-):
-    """
-    Weights covering features the run does not have are harmless.
-
-    Feature rows label independent groups, so a weight file describing a wider
-    domain than the run should narrow to the run rather than fail — the
-    opposite of the formulation axis, where an extra member would leave the
-    selected weights summing to under 1.
-    """
-    wider = weight_array(
-        list(feature_ids) + [999],
-        formulation_names,
-        {
-            101: [0.5, 0.3, 0.2],
-            102: [0.5, 0.3, 0.2],
-            103: [0.5, 0.3, 0.2],
-            201: [0.25, 0.75, 0.0],
-            999: [1.0, 0.0, 0.0],
-        },
-    )
-
-    ds_stats = build_stats(combined_ds, raw_files, stats_config, weights=wider)
-
-    assert list(ds_stats["feature_id"].values) == list(feature_ids)
-    expected = build_stats(combined_ds, raw_files, stats_config, weights=weights)
-    np.testing.assert_allclose(mean_values(ds_stats), mean_values(expected))
-
-
 # --------------------------------------------------------------------- #
 # Laziness                                                              #
 # --------------------------------------------------------------------- #
@@ -516,17 +486,52 @@ def test_weights_omitting_a_feature_raise_rather_than_shrinking_the_output(
         build_stats(combined_ds, raw_files, stats_config, weights=short)
 
 
-def test_weights_on_a_dimension_the_dataset_lacks_raise(
+def test_weights_carrying_extra_feature_ids_raise(
+    combined_ds, raw_files, stats_config, feature_ids, formulation_names
+):
+    """
+    Weights covering features the run does not have are not this run's weights.
+
+    ``resolve_weights`` expands onto the feature ids of the dataset it is
+    resolved against, so a wider array cannot have come from this run — a
+    weight file describing a wider domain is narrowed there, before the array
+    exists.  Silently dropping the extras here would instead let a stale array
+    resolved against another domain through, weighting this run with that
+    domain's numbers wherever the two happened to share an id.
+    """
+    wider = weight_array(
+        list(feature_ids) + [999],
+        formulation_names,
+        {
+            101: [0.5, 0.3, 0.2],
+            102: [0.5, 0.3, 0.2],
+            103: [0.5, 0.3, 0.2],
+            201: [0.25, 0.75, 0.0],
+            999: [1.0, 0.0, 0.0],
+        },
+    )
+
+    with pytest.raises(ValueError, match=r"'feature_id' labels.*\[999\]"):
+        build_stats(combined_ds, raw_files, stats_config, weights=wider)
+
+
+def test_weights_over_the_wrong_axes_entirely_raise(
     combined_ds, raw_files, stats_config, formulation_names
 ):
-    """A weight axis the dataset does not label cannot be matched to anything."""
+    """
+    Weights must be over ``(feature_id, formulation)``, the only shape produced.
+
+    An array indexed by some other axis is not a near miss to be reconciled
+    against ``feature_id`` — it did not come from ``resolve_weights`` at all,
+    so it is rejected by shape rather than by label.
+    """
     by_basin = xr.DataArray(
         np.full((2, 3), 1.0 / 3.0),
         dims=("basin", "formulation"),
         coords={"basin": ["upper", "lower"], "formulation": list(formulation_names)},
     )
 
-    with pytest.raises(ValueError, match="'basin' dimension"):
+    with pytest.raises(ValueError, match="must carry a 'feature_id' dimension"):
         build_stats(combined_ds, raw_files, stats_config, weights=by_basin)
 
 
