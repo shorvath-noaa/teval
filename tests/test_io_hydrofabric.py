@@ -243,6 +243,17 @@ def test_boolean_toid_column_raises():
         build_nexus_crosswalk(frame)
 
 
+def test_boolean_toid_among_other_types_raises():
+    """The same hazard hidden in an object column, which is not bool-dtyped:
+    the check is on the values, so both sides of the join are guarded."""
+    frame = pd.DataFrame(
+        {"toid": [True, "nex-9001"]}, index=pd.Index([101, 102], name="id")
+    )
+
+    with pytest.raises(ValueError, match="boolean"):
+        build_nexus_crosswalk(frame)
+
+
 def test_missing_feature_id_raises():
     """A flowpath with no id cannot be addressed in the dataset at all."""
     frame = pd.DataFrame({"toid": [9001, 9002]}, index=pd.Index([101, None], name="id"))

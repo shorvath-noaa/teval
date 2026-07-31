@@ -429,42 +429,12 @@ def _nexus_keys(values: Iterable, context: str) -> np.ndarray:
     """
     Reduce nexus identifiers to the integers the hydrofabric's ``toid`` carries.
 
-    Weight-file nexus ids keep whatever spelling the file used, so they are
-    reduced by :func:`teval.identifiers.as_identifiers` — the same one
-    ``build_nexus_crosswalk`` applies to the hydrofabric, and the same
-    docstring that says what the prefix is for.
-
-    Nothing here is guessed at.  An identifier that carries no digits, or that
-    is not integral, raises rather than being reduced to something plausible:
-    a misread id would match no nexus, and under the default ``on_missing``
-    policy that presents as a coverage shortfall — "your file did not cover
-    this domain" — when the truth is that the file was misparsed.
+    Both sides of the join reduce through :func:`teval.identifiers`, and a
+    nexus that reduces to nothing is fatal here rather than merely uncovered,
+    which is what ``required`` asks for.
     """
-    listed = list(values)
-    if not listed:
-        return np.empty(0, dtype=np.int64)
-
-    series = pd.Series(listed, dtype=object)
-
-    # Checked here rather than left to as_identifiers, which only sees a bool
-    # *dtype*: True is an int in Python and would otherwise key nexus 1.
-    booleans = [v for v in listed if isinstance(v, (bool, np.bool_))]
-    if booleans:
-        raise ValueError(
-            f"{context} is not a nexus identifier: "
-            f"{describe([repr(v) for v in booleans])}."
-        )
-
-    reduced = as_identifiers(series, context)
-
-    unreadable = reduced.isna()
-    if unreadable.any():
-        raise ValueError(
-            f"{context} carries no digits and cannot be matched against the "
-            f"hydrofabric's integer nexus ids: "
-            f"{describe([repr(v) for v in series[unreadable]])}."
-        )
-    return reduced.to_numpy(dtype=np.int64)
+    listed = pd.Series(list(values), dtype=object)
+    return as_identifiers(listed, context, required=True).to_numpy(dtype=np.int64)
 
 
 def _as_feature_ids(values: Iterable, context: str) -> np.ndarray:

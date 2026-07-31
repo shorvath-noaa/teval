@@ -268,7 +268,7 @@ def test_boolean_crosswalk_key_raises(
     weight_frame, formulation_index_map, formulation_names, feature_ids
 ):
     """``True`` is an int in Python and would silently key nexus 1."""
-    with pytest.raises(ValueError, match="not a nexus identifier"):
+    with pytest.raises(ValueError, match="boolean"):
         resolve_weights(
             weight_frame,
             formulation_index_map,

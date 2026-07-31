@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import logging
 
+import numpy as np
 import pandas as pd
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,11 @@ def describe(items) -> str:
     return f"{text} (and {remaining} more)" if remaining else text or "(none)"
 
 
-def as_identifiers(values: pd.Series, context: str) -> pd.Series:
+def as_identifiers(
+    values: pd.Series,
+    context: str,
+    required: bool = False,
+) -> pd.Series:
     """
     Reduce an identifier column to the integer form the hydrofabric stores.
 
@@ -84,23 +89,44 @@ def as_identifiers(values: pd.Series, context: str) -> pd.Series:
         How to name these identifiers in an error message.  Rendered at the
         start of the sentence, so pass something that reads as a subject, such
         as ``"The 'toid' column"``.
+    required:
+        If True, an entry that reduces to nothing is an error rather than NA.
+        Use it wherever a missing identifier cannot be tolerated: an id that
+        matched nothing presents as a coverage shortfall — "your file did not
+        cover this domain" — when the truth is that it was misparsed.
 
     Returns
     -------
     pd.Series
         Float series, positionally aligned with ``values``, carrying NA where
-        an identifier is missing or holds no digits at all.  A caller for whom
-        NA is not acceptable rejects it itself, so this function never guesses.
+        an identifier is missing or holds no digits at all unless *required*.
+        Float rather than int because NA is representable in it; an id above
+        2^53 spelled as a string would therefore lose precision, which no
+        NextGen identifier is close to reaching.
 
     Raises
     ------
     ValueError
-        The column is boolean, or carries a non-integral number that cannot be
-        a hydrofabric identifier.
+        The column carries a boolean, or a non-integral number that cannot be
+        a hydrofabric identifier, or — with *required* — an entry that reduces
+        to nothing.
     """
+    # Booleans are checked by value and not only by dtype: an object column
+    # holding True is not bool-dtyped, and True is an int in Python, so it
+    # would otherwise reduce silently to identifier 1.
     if pd.api.types.is_bool_dtype(values):
+        booleans = list(values)
+    else:
+        raw = values.to_numpy()
+        booleans = (
+            [v for v in raw if isinstance(v, (bool, np.bool_))]
+            if raw.dtype == object
+            else []
+        )
+    if booleans:
         raise ValueError(
-            f"{context} is boolean and cannot hold hydrofabric identifiers."
+            f"{context} carries boolean value(s) {describe(booleans)} and "
+            f"cannot hold hydrofabric identifiers."
         )
 
     numeric = pd.to_numeric(values, errors="coerce")
@@ -120,5 +146,13 @@ def as_identifiers(values: pd.Series, context: str) -> pd.Series:
             f"{context} carries non-integer value(s) "
             f"{describe(sorted(set(numeric[fractional].tolist())))}; "
             f"hydrofabric identifiers are integers."
+        )
+
+    unreadable = numeric.isna()
+    if required and unreadable.any():
+        raise ValueError(
+            f"{context} carries no digits and cannot be matched against the "
+            f"hydrofabric's integer identifiers: "
+            f"{describe([repr(v) for v in values[unreadable]])}."
         )
     return numeric
