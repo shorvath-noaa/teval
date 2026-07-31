@@ -224,21 +224,22 @@ class WeightsConfig(BaseModel):
 
     @field_validator("formulation_index_map")
     def validate_formulation_index_map(cls, v):
-        """Ensure the map is non-empty, 1-based, and names each formulation once."""
-        if not v:
-            raise ValueError("formulation_index_map must not be empty.")
+        """
+        Ensure the indices are 1-based, the only rule config can decide alone.
+
+        Whether the map names the right formulations — and so whether it is
+        empty, or spends two indices on one name and leaves another unnamed —
+        depends on the formulations the run discovers, which configuration
+        cannot see.  The resolver settles all of that with one set comparison
+        against the run, so those checks are not duplicated here.  Index
+        numbering is different: 1 is the base of the file format itself, so a 0
+        or negative key is wrong whatever the run turns out to contain.
+        """
         bad_indices = sorted(i for i in v if i < 1)
         if bad_indices:
             raise ValueError(
                 f"formulation_index_map keys must be 1-based positive integers; "
                 f"got {bad_indices}."
-            )
-        names = list(v.values())
-        duplicates = sorted({name for name in names if names.count(name) > 1})
-        if duplicates:
-            raise ValueError(
-                f"formulation_index_map must name each formulation at most once; "
-                f"duplicated: {duplicates}."
             )
         return v
 

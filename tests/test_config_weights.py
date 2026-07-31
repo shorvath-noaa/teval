@@ -151,22 +151,38 @@ def test_unknown_on_missing_value_rejected(formulation_index_map):
         )
 
 
-def test_empty_formulation_index_map_rejected():
-    """An empty legend binds nothing and cannot be a bijection."""
-    with pytest.raises(ValidationError, match="must not be empty"):
-        WeightsConfig(file="weights.csv", formulation_index_map={})
-
-
 def test_zero_based_formulation_index_map_rejected():
     """Indices are 1-based, so a 0 index is a config error, not an off-by-one."""
     with pytest.raises(ValidationError, match="1-based"):
         WeightsConfig(file="weights.csv", formulation_index_map={0: "formA"})
 
 
-def test_duplicate_formulation_names_rejected():
-    """Two indices naming one formulation is not a bijection."""
-    with pytest.raises(ValidationError, match="at most once"):
+def test_negative_formulation_index_rejected():
+    """1-based means positive; a negative key is wrong whatever the run holds."""
+    with pytest.raises(ValidationError, match="1-based"):
         WeightsConfig(
             file="weights.csv",
-            formulation_index_map={1: "formA", 2: "formA"},
+            formulation_index_map={-3: "formA", 1: "formB"},
         )
+
+
+@pytest.mark.parametrize(
+    "index_map",
+    [
+        pytest.param({}, id="empty"),
+        pytest.param({1: "formA", 2: "formA"}, id="one-name-twice"),
+    ],
+)
+def test_maps_only_the_run_can_judge_are_left_to_the_resolver(index_map):
+    """
+    Config validates index numbering and nothing that depends on the run.
+
+    Whether a legend binds the right names is a comparison against the
+    formulations the run discovered, which configuration cannot see.  The
+    resolver decides it with one set comparison and reports which formulation
+    was left unbound (see ``test_weights_resolve.py``); rejecting a subset of
+    those maps here would only mean two different messages for one mistake.
+    """
+    weights = WeightsConfig(file="weights.csv", formulation_index_map=index_map)
+
+    assert weights.formulation_index_map == index_map
