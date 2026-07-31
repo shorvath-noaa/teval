@@ -225,16 +225,21 @@ class WeightsConfig(BaseModel):
     @field_validator("formulation_index_map")
     def validate_formulation_index_map(cls, v):
         """
-        Ensure the indices are 1-based, the only rule config can decide alone.
+        Ensure the map names something and numbers it from 1.
 
-        Whether the map names the right formulations — and so whether it is
-        empty, or spends two indices on one name and leaves another unnamed —
-        depends on the formulations the run discovers, which configuration
-        cannot see.  The resolver settles all of that with one set comparison
-        against the run, so those checks are not duplicated here.  Index
-        numbering is different: 1 is the base of the file format itself, so a 0
-        or negative key is wrong whatever the run turns out to contain.
+        Both rules hold whatever the run turns out to contain — an empty legend
+        binds no formulation at all, and 1 is the base of the file format
+        itself — so they fail at config load rather than per-domain after
+        discovery and hydrofabric loading.  Whether the map names the *right*
+        formulations does need the run; the resolver settles that with one set
+        comparison, and it is not duplicated here.
         """
+        if not v:
+            raise ValueError(
+                "formulation_index_map is empty; weighting needs a legend "
+                "binding each weight-file index to a formulation name."
+            )
+
         bad_indices = sorted(i for i in v if i < 1)
         if bad_indices:
             raise ValueError(

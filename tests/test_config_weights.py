@@ -166,23 +166,32 @@ def test_negative_formulation_index_rejected():
         )
 
 
-@pytest.mark.parametrize(
-    "index_map",
-    [
-        pytest.param({}, id="empty"),
-        pytest.param({1: "formA", 2: "formA"}, id="one-name-twice"),
-    ],
-)
-def test_maps_only_the_run_can_judge_are_left_to_the_resolver(index_map):
+def test_empty_formulation_index_map_rejected():
     """
-    Config validates index numbering and nothing that depends on the run.
+    A legend binding nothing is wrong whatever the run holds, so it fails here.
+
+    The resolver would catch it too, as an unmapped formulation — but only
+    per-domain, after discovery and hydrofabric loading.  Nothing about the
+    run is needed to know an empty map is useless, so the run stops at config
+    load instead.
+    """
+    with pytest.raises(ValidationError, match="empty"):
+        WeightsConfig(file="weights.csv", formulation_index_map={})
+
+
+def test_maps_only_the_run_can_judge_are_left_to_the_resolver():
+    """
+    Config validates what it can decide alone and nothing that depends on the run.
 
     Whether a legend binds the right names is a comparison against the
-    formulations the run discovered, which configuration cannot see.  The
-    resolver decides it with one set comparison and reports which formulation
-    was left unbound (see ``test_weights_resolve.py``); rejecting a subset of
-    those maps here would only mean two different messages for one mistake.
+    formulations the run discovered, which configuration cannot see.  A map
+    spending two indices on one name leaves some other formulation unbound —
+    but which one, and whether it matters, is the resolver's set comparison to
+    make (see ``test_weights_resolve.py``); rejecting the map here would only
+    mean two different messages for one mistake.
     """
+    index_map = {1: "formA", 2: "formA"}
+
     weights = WeightsConfig(file="weights.csv", formulation_index_map=index_map)
 
     assert weights.formulation_index_map == index_map
