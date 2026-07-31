@@ -83,8 +83,10 @@ class _WeightPlan:
         Tidy weight frame as ``read_weight_file`` returned it.
     crosswalk:
         Nexus to draining feature ids, as ``build_nexus_crosswalk`` returned it.
-        Empty when the domain has no hydrofabric, which surfaces as zero
-        coverage under the configured ``on_missing`` policy.
+        A domain with no hydrofabric never reaches this far -- see
+        ``_prepare_weight_plan`` -- so the crosswalk is empty only when a
+        hydrofabric was loaded and placed none of its flowpaths, which surfaces
+        as zero coverage under the configured ``on_missing`` policy.
     """
 
     config: WeightsConfig
@@ -95,6 +97,7 @@ class _WeightPlan:
 def _prepare_weight_plan(
     stats_config: StatsConfig,
     gdf_hydro: gpd.GeoDataFrame,
+    reusing_ensemble: bool = False,
 ) -> Optional[_WeightPlan]:
     """
     Read the weight file and build the crosswalk, or return None if unweighted.
@@ -102,10 +105,49 @@ def _prepare_weight_plan(
     ``None`` means no ``stats.weights`` block was configured, and the caller
     leaves the unweighted code path entirely untouched -- no file is read, no
     crosswalk is built and ``build_stats`` is reached exactly as before.
+
+    *reusing_ensemble* says this domain will return a pre-computed ensemble
+    rather than build statistics.  Such a run never consumes the crosswalk, so
+    the missing-hydrofabric guard below is not applied to it: the accurate
+    complaint there is that weighting is bypassed altogether, which
+    ``_process_formulation_files`` makes loudly, and raising instead would
+    refuse a configuration the design explicitly permits.
+
+    Raises
+    ------
+    ValueError
+        Weights are configured, statistics will be built, but this domain has
+        no hydrofabric.  The crosswalk that turns per-nexus weights into
+        per-feature weights is derived from the hydrofabric's flowpaths, so
+        without one there is nothing to join the weight file to.  That is a
+        configuration mistake rather than a coverage shortfall, so it is
+        refused here instead of being handed to ``on_missing`` -- under the
+        default 'warn' the run would otherwise complete with an entirely
+        unweighted mean, quietly ignoring the file the user supplied.  A
+        hydrofabric that *is* present but places no flowpaths does go to the
+        coverage policy: there the crosswalk was possible and simply came back
+        empty.
+    FileNotFoundError
+        The configured weight file does not exist.
     """
     weights_config = stats_config.weights
     if weights_config is None:
         return None
+
+    if not reusing_ensemble and (gdf_hydro is None or len(gdf_hydro) == 0):
+        raise ValueError(
+            f"Ensemble weights are configured (stats.weights.file="
+            f"{weights_config.file}), but this domain has no hydrofabric. "
+            f"Weights are supplied per nexus while the ensemble is indexed by "
+            f"feature_id, and the nexus-to-feature crosswalk is derived from "
+            f"the hydrofabric's flowpaths, so without one no weight can be "
+            f"placed on any feature. Supply this domain's hydrofabric "
+            f"GeoPackage, or remove the stats.weights block to run unweighted. "
+            f"Note that teval only looks for hydrofabrics when metrics or the "
+            f"interactive map are enabled, so a GeoPackage sitting in "
+            f"io.hydrofabric_dir is not loaded for a run with both switched "
+            f"off."
+        )
 
     frame = read_weight_file(weights_config.file)
     crosswalk = build_nexus_crosswalk(gdf_hydro)
@@ -193,15 +235,32 @@ def load_domain_data(domain_dict: Dict, io: IOConfig, stats_config: StatsConfig)
        bounds the formulation files report.
 
     With no stats.weights block the plan is None and every step behaves exactly
-    as it did before weighting existed.
+    as it did before weighting existed -- including for a domain with no
+    hydrofabric, which stays a supported entry.
+
+    Raises
+    ------
+    ValueError
+        Weights are configured for a domain that will build statistics but has
+        no hydrofabric, which makes the nexus-to-feature crosswalk impossible.
+        Raised in step 1, before a single formulation file is opened.  A domain
+        reusing a pre-computed ensemble is exempt: it needs no crosswalk, and
+        the bypass warning describes it accurately where this error would not.
     """
     results = {}
 
     # Process Hydrofabric
     results['hydrofabric'], all_gage_ids, results['gage_to_fids'], results['gage_to_nexus'] = load_hydrofabric(domain_dict['hydrofabric'])
 
-    # Prepare Weights (no-op when stats.weights is absent)
-    weight_plan = _prepare_weight_plan(stats_config, results['hydrofabric'])
+    # Prepare Weights (no-op when stats.weights is absent).  Whether a
+    # pre-computed ensemble will be reused is known from the domain map alone,
+    # and it decides which of the two guard rails this configuration is under.
+    ensemble_file = domain_dict['formulations'].get('ensemble_file')
+    weight_plan = _prepare_weight_plan(
+        stats_config,
+        results['hydrofabric'],
+        reusing_ensemble=bool(ensemble_file and ensemble_file.exists()),
+    )
 
     # Process Formulations
     results['formulations'] = {'combined': None, 'ensemble_members': None}
@@ -233,7 +292,9 @@ def _process_formulation_files(
     dataset opened here and passed to ``build_stats``.  ``None`` -- the default,
     and what an unconfigured run supplies -- takes the unweighted path
     unchanged.  A pre-computed ensemble is returned as it was written and the
-    plan goes unused, since the statistics it holds were built elsewhere.
+    plan goes unused, since the statistics it holds were built elsewhere; that
+    combination is legal but almost never what was meant, so it warns loudly
+    rather than passing in silence.
 
     Whichever path the mean took is recorded on the returned statistics dataset
     as provenance attributes, so the output NetCDF the pipeline writes from it
@@ -251,8 +312,24 @@ def _process_formulation_files(
     # Load Pre-Computed Ensemble (if it exists)
     if ensemble_file and ensemble_file.exists():
         logger.debug(f"Loading pre-computed ensemble from {ensemble_file.name}")
-        
+
         ds_stats = xr.open_dataset(ensemble_file, engine="h5netcdf", chunks={'feature_id': 'auto'})
+
+        # Reusing a pre-computed ensemble skips build_stats, and weighting lives
+        # inside build_stats, so a weighted configuration has no effect here.
+        # Said loudly because the run otherwise succeeds and looks weighted: the
+        # configuration names a weight file, the log shows no error, and the
+        # output holds whatever mean the cached file was written with.
+        if weight_plan is not None:
+            logger.warning(
+                f"ENSEMBLE WEIGHTS NOT APPLIED: stats.weights configures weights "
+                f"from {weight_plan.config.file}, but this domain reuses the "
+                f"pre-computed ensemble {ensemble_file}. Its statistics were "
+                f"built elsewhere, and weighting is applied where they are built, "
+                f"so the mean in the output is whatever that file already held -- "
+                f"weighted or not. Remove or repoint the pre-computed ensemble to "
+                f"rebuild the statistics with these weights."
+            )
 
         if 'time' in ds_stats.coords:
             t_min = pd.to_datetime(ds_stats.time.min().values)

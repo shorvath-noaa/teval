@@ -404,36 +404,71 @@ def test_on_missing_error_aborts_the_domain(
         )
 
 
-def test_a_domain_without_a_hydrofabric_covers_nothing(
-    raw_files, weight_file, formulation_index_map, no_hydrofabric,
+@pytest.mark.parametrize("on_missing", ["warn", "error"])
+def test_a_domain_without_a_hydrofabric_is_refused(
+    raw_files, weight_file, formulation_index_map, no_hydrofabric, on_missing,
 ):
     """
-    No hydrofabric means no crosswalk, so every feature is uncovered.
+    No hydrofabric means no crosswalk, and that is refused rather than absorbed.
 
-    Under 'warn' that degrades to the plain mean rather than failing; under
-    'error' it aborts.  (A dedicated up-front guard for this configuration is
-    a separate concern; what is pinned here is that the wiring does not
-    crash or silently apply a wrong group.)
+    Weights are supplied per nexus and the ensemble is indexed by feature id;
+    the hydrofabric is the only thing that relates the two.  Without one there
+    is no join to make, so this is a broken configuration rather than a
+    coverage shortfall -- and it is not left to ``on_missing``, whose default
+    'warn' would otherwise complete the run with an entirely unweighted mean
+    while the user believes the file they supplied was applied.  Both policies
+    are exercised because the claim is that the guard does not consult them.
     """
-    results = workflow.load_domain_data(
-        _domain(raw_files),
-        IOConfig(),
-        _weighted_config(weight_file, formulation_index_map),
-    )
+    with pytest.raises(ValueError, match="no hydrofabric"):
+        workflow.load_domain_data(
+            _domain(raw_files),
+            IOConfig(),
+            _weighted_config(
+                weight_file, formulation_index_map, on_missing=on_missing
+            ),
+        )
+
+
+def test_the_missing_hydrofabric_guard_fires_before_the_ensemble_is_opened(
+    raw_files, weight_file, formulation_index_map, no_hydrofabric, monkeypatch,
+):
+    """
+    The refusal costs a second, not a run's worth of file opening.
+
+    Everything the guard needs is known once the hydrofabric step has produced
+    nothing, so a configuration that cannot possibly work must not first open
+    every formulation file.  Asserted by making that step explode.
+    """
+    def explode(*args, **kwargs):
+        raise AssertionError("the formulation step ran despite no hydrofabric")
+
+    monkeypatch.setattr(workflow, "_process_formulation_files", explode)
+
+    with pytest.raises(ValueError, match="no hydrofabric"):
+        workflow.load_domain_data(
+            _domain(raw_files),
+            IOConfig(),
+            _weighted_config(weight_file, formulation_index_map),
+        )
+
+
+def test_an_unweighted_run_without_a_hydrofabric_is_untouched(
+    raw_files, no_hydrofabric,
+):
+    """
+    The guard is about weights, not about hydrofabrics.
+
+    ``hydrofabric: None`` is a supported domain entry -- a run with metrics and
+    the interactive map switched off never loads one -- so an unweighted run
+    must still produce the plain mean rather than meet the new error.
+    """
+    results = workflow.load_domain_data(_domain(raw_files), IOConfig(), StatsConfig())
+
     ds_stats, got = _mean_of(results)
     np.testing.assert_allclose(
         got,
         _expected_mean(ALL_EQUAL_MEMBER_PARTS, ds_stats),
     )
-
-    with pytest.raises(ValueError):
-        workflow.load_domain_data(
-            _domain(raw_files),
-            IOConfig(),
-            _weighted_config(
-                weight_file, formulation_index_map, on_missing="error"
-            ),
-        )
 
 
 # --------------------------------------------------------------------- #
@@ -566,6 +601,146 @@ def test_a_precomputed_ensemble_is_returned_as_written(
     np.testing.assert_allclose(ds_stats.streamflow_mean.compute().values, 7.0)
     assert not [
         r for r in caplog.records if "Applying ensemble weights" in r.getMessage()
+    ]
+
+
+@pytest.fixture
+def precomputed_ensemble_file(tmp_path):
+    """A cached ensemble NetCDF, whose statistics this run did not build."""
+    path = tmp_path / "precomputed_ensemble.nc"
+    xr.Dataset(
+        {"streamflow_mean": (("time", "feature_id"), np.zeros((4, 4)) + 7.0)},
+        coords={
+            "time": pd.date_range("2020-01-01", periods=4, freq="h"),
+            "feature_id": [101, 102, 103, 201],
+        },
+    ).to_netcdf(path, engine="h5netcdf")
+    return path
+
+
+def _bypass_warnings(caplog):
+    """Warning records announcing that configured weights went unapplied."""
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+        and "ENSEMBLE WEIGHTS NOT APPLIED" in record.getMessage()
+    ]
+
+
+def test_reusing_a_precomputed_ensemble_with_weights_warns_loudly(
+    raw_files, precomputed_ensemble_file, weight_file, formulation_index_map,
+    hydrofabric, caplog,
+):
+    """
+    The bypass is announced, once, naming both files involved.
+
+    This configuration is legal and the run succeeds, which is exactly why it
+    needs saying: the mean in the output is whatever the cached file already
+    held, and nothing else in the run reports that the weight file went
+    unused.  The warning names the weight file (so it is clear which
+    configuration was ignored) and the ensemble file (so it is clear what to
+    remove to get weighting back).
+    """
+    with caplog.at_level(logging.DEBUG, logger=WORKFLOW_LOGGER):
+        results = workflow.load_domain_data(
+            _domain(raw_files, ensemble_file=precomputed_ensemble_file),
+            IOConfig(),
+            _weighted_config(weight_file, formulation_index_map),
+        )
+
+    warnings = _bypass_warnings(caplog)
+    assert len(warnings) == 1
+    assert str(weight_file) in warnings[0]
+    assert str(precomputed_ensemble_file) in warnings[0]
+
+    # And the values really are the cached ones, unweighted by this run.
+    np.testing.assert_allclose(
+        results["formulations"]["combined"].streamflow_mean.compute().values, 7.0
+    )
+
+
+def test_no_bypass_warning_when_no_weights_are_configured(
+    raw_files, precomputed_ensemble_file, hydrofabric, caplog,
+):
+    """
+    Reusing a cached ensemble is ordinary; only doing so *with weights* is not.
+
+    Warning on every cached run would train the reader to ignore the line.
+    """
+    with caplog.at_level(logging.DEBUG, logger=WORKFLOW_LOGGER):
+        workflow.load_domain_data(
+            _domain(raw_files, ensemble_file=precomputed_ensemble_file),
+            IOConfig(),
+            StatsConfig(),
+        )
+
+    assert _bypass_warnings(caplog) == []
+
+
+def test_no_bypass_warning_when_the_weights_are_actually_applied(
+    raw_files, weight_file, formulation_index_map, hydrofabric, caplog,
+):
+    """A weighted run that builds its own statistics has nothing to confess."""
+    with caplog.at_level(logging.DEBUG, logger=WORKFLOW_LOGGER):
+        workflow.load_domain_data(
+            _domain(raw_files),
+            IOConfig(),
+            _weighted_config(weight_file, formulation_index_map),
+        )
+
+    assert _bypass_warnings(caplog) == []
+
+
+def test_a_reused_ensemble_without_a_hydrofabric_warns_rather_than_aborts(
+    raw_files, precomputed_ensemble_file, weight_file, formulation_index_map,
+    no_hydrofabric, caplog,
+):
+    """
+    The two guards do not collide, and the accurate one wins.
+
+    A run with metrics and the interactive map switched off loads no
+    hydrofabric at all, so this combination arises without anyone asking for
+    it.  Refusing it would abort a run that was never going to need a
+    crosswalk -- nothing here consults one -- when the true complaint is that
+    the weight file went unused, which is what gets said.
+    """
+    with caplog.at_level(logging.DEBUG, logger=WORKFLOW_LOGGER):
+        results = workflow.load_domain_data(
+            _domain(raw_files, ensemble_file=precomputed_ensemble_file),
+            IOConfig(),
+            _weighted_config(weight_file, formulation_index_map),
+        )
+
+    np.testing.assert_allclose(
+        results["formulations"]["combined"].streamflow_mean.compute().values, 7.0
+    )
+    assert len(_bypass_warnings(caplog)) == 1
+    assert not [
+        r for r in caplog.records if "no hydrofabric" in r.getMessage()
+    ]
+
+
+def test_neither_guard_fires_on_a_normal_unweighted_run(
+    raw_files, hydrofabric, caplog,
+):
+    """
+    A run that never mentions weights hears nothing about them.
+
+    Both guards are keyed on the weights block, so an ordinary run must reach
+    its plain mean without a warning, an error, or a line naming the feature
+    at all.
+    """
+    with caplog.at_level(logging.DEBUG, logger=WORKFLOW_LOGGER):
+        results = workflow.load_domain_data(
+            _domain(raw_files), IOConfig(), StatsConfig()
+        )
+
+    ds_stats, got = _mean_of(results)
+    np.testing.assert_allclose(got, _expected_mean(ALL_EQUAL_MEMBER_PARTS, ds_stats))
+    assert not [
+        r for r in caplog.records
+        if r.levelno >= logging.WARNING and "weight" in r.getMessage().lower()
     ]
 
 
