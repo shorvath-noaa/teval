@@ -22,12 +22,10 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Everything that is not a digit, stripped when reducing a string identifier
-# such as "nex-9001" to the integer form load_hydrofabric stores.
+# Stripped from a string identifier like "nex-9001", as load_hydrofabric does.
 _NON_DIGITS = r"\D+"
 
-#: How many offenders an error message names before truncating.  Enough to see
-#: a pattern, short enough to stay readable.
+#: How many offenders an error message names before truncating.
 MAX_REPORTED = 10
 
 
@@ -117,8 +115,8 @@ def as_identifiers(
 
     numeric = pd.to_numeric(values, errors="coerce")
 
-    # Whatever did not read as a number is a string identifier; strip it down
-    # to the digits it carries, exactly as load_hydrofabric does.
+    # Whatever did not read as a number is a string identifier; strip it to its
+    # digits, as load_hydrofabric does.
     unparsed = numeric.isna() & pd.notna(values)
     if unparsed.any():
         digits = values[unparsed].astype(str).str.replace(_NON_DIGITS, "", regex=True)

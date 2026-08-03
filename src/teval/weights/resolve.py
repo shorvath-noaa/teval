@@ -57,8 +57,8 @@ from teval.weights.reader import REQUIRED_COLUMNS
 
 logger = logging.getLogger(__name__)
 
-#: How far a group's sum may sit from 1.0 before it is rejected.  Wide enough
-#: that 0.5 + 0.3 + 0.2 passes, narrow enough that a real error does not.
+#: How far a group's sum may sit from 1.0 before it is rejected; wide enough
+#: that 0.5 + 0.3 + 0.2 passes.
 SUM_TOLERANCE = 1e-6
 
 #: Accepted values of ``stats.weights.on_missing``.
@@ -536,11 +536,8 @@ def _apply_coverage_policy(report: CoverageReport, on_missing: str) -> None:
         )
 
     if report.is_complete:
-        # Debug rather than info: complete coverage is the uneventful case, and
-        # the caller wiring weights into a run emits one summary line per domain
-        # naming the file it came from.  Two identical summaries per domain, one
-        # of them without the file path, is noise.  Incomplete coverage still
-        # warns from here, since that is the resolver's own policy decision.
+        # Debug, not info: the uneventful case, and the caller already logs one
+        # summary per domain naming the file
         logger.debug(f"Weights cover every feature in the run: {report.summary()}.")
         return
 
@@ -591,12 +588,10 @@ def _expand_to_features(
     cross_features, cross_keys = _crosswalk_arrays(nexus_to_features)
     group_keys = _group_keys(groups)
 
-    # Feature -> nexus key, with -1 marking a feature the crosswalk does not
-    # place (no hydrofabric row, or a nexus this run does not drain to).
-    # -1 never matches a real nexus key, so such features fall through to the
-    # uncovered branch without a special case.  The mask is applied before
-    # indexing rather than after: a -1 fed to a numpy take wraps to the last
-    # row instead of failing, which would hand a feature another nexus' weights.
+    # Feature -> nexus key, -1 where the crosswalk does not place the feature;
+    # it matches no real key, so those fall through to uncovered.  Mask before
+    # indexing: a -1 in a numpy take wraps to the last row instead of failing,
+    # handing that feature another nexus' weights.
     from_cross = pd.Index(cross_features).get_indexer(target_index)
     placed = from_cross >= 0
     nexus_of_feature = np.full(target_index.size, -1, dtype=np.int64)

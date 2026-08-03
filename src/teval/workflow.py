@@ -228,9 +228,7 @@ def _resolve_domain_weights(
         on_missing=plan.config.on_missing,
     )
 
-    # One summary line per domain, naming the file that produced it, so a run's
-    # log says which weights were applied and how much of the domain they
-    # reached without having to reconstruct it from the resolver's own lines.
+    # One summary line per domain, naming the file it came from
     logger.info(
         f"Applying ensemble weights from {plan.config.file}: {report.summary()}. "
         f"Median and the spread band remain unweighted."
@@ -274,9 +272,7 @@ def load_domain_data(domain_dict: Dict, io: IOConfig, stats_config: StatsConfig)
     # Process Hydrofabric
     results['hydrofabric'], all_gage_ids, results['gage_to_fids'], results['gage_to_nexus'] = load_hydrofabric(domain_dict['hydrofabric'])
 
-    # Prepare Weights (no-op when stats.weights is absent).  Whether a
-    # pre-computed ensemble will be reused is known from the domain map alone,
-    # and it decides which of the two guard rails this configuration is under.
+    # Prepare Weights (no-op when stats.weights is absent)
     weight_plan = _prepare_weight_plan(
         stats_config,
         results['hydrofabric'],
@@ -330,19 +326,14 @@ def _process_formulation_files(
     combined_ds = None
     t_min, t_max = None, None
 
-    # Load Pre-Computed Ensemble (if it exists).  Asked through the shared
-    # predicate, since ``load_domain_data`` decided which guard rail this run is
-    # under by asking the same question of the same domain map entry.
+    # Load Pre-Computed Ensemble (if it exists)
     if reuses_precomputed_ensemble(formulation_dict):
         logger.debug(f"Loading pre-computed ensemble from {ensemble_file.name}")
 
         ds_stats = xr.open_dataset(ensemble_file, engine="h5netcdf", chunks={'feature_id': 'auto'})
 
-        # Reusing a pre-computed ensemble skips build_stats, and weighting lives
-        # inside build_stats, so a weighted configuration has no effect here.
-        # Said loudly because the run otherwise succeeds and looks weighted: the
-        # configuration names a weight file, the log shows no error, and the
-        # output holds whatever mean the cached file was written with.
+        # Weighting lives in build_stats, which this branch skips, so the run
+        # otherwise succeeds looking weighted
         if weight_plan is not None:
             logger.warning(
                 f"ENSEMBLE WEIGHTS NOT APPLIED: stats.weights configures weights "
@@ -386,10 +377,8 @@ def _process_formulation_files(
         )
         ds_stats = build_stats(combined_ds, raw_files, stats_config, weights=weights)
 
-        # Provenance, recorded on the statistics dataset itself so it travels
-        # to the NetCDF the pipeline writes from it.  Written on both branches:
-        # the point is that a file says which kind of mean it holds, and an
-        # unweighted run saying nothing at all would leave that to inference.
+        # Recorded on the dataset itself, so it travels to the NetCDF the
+        # pipeline writes from it.  Both branches: see teval.weights.provenance
         ds_stats.attrs.update(weighting_attrs(applied))
 
     elif ds_stats is None and combined_ds is None:

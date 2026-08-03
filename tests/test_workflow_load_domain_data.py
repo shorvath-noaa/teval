@@ -16,11 +16,8 @@ dependency that forces observations to stay last, and assert that reordering
 changed no result — both against a transcription of the previous
 implementation and against a real end-to-end unweighted load.
 
-The transcription tracks the previous *order*, not a frozen historical
-signature: it forwards the weight-plan argument the later wiring work added to
-``_process_formulation_files``, since a parameter that did not exist then
-carries no ordering information now.  The wiring itself is covered separately,
-in ``test_workflow_weights.py``.
+The wiring the reorder was made for is covered separately, in
+``test_workflow_weights.py``.
 """
 
 from __future__ import annotations
@@ -223,14 +220,9 @@ def _load_domain_data_previous_order(domain_dict, io, stats_config):
     rather than against a restatement of the new code's behaviour.  Attribute
     lookups go through the ``workflow`` module so the same patches apply.
 
-    The one departure from the original transcription is the third argument to
-    ``_process_formulation_files``, which the later weight-wiring work added.
-    It is forwarded here as the ``None`` an unweighted configuration produces,
-    so the comparison keeps isolating *ordering* rather than drifting into a
-    signature check.  That ``None`` is not a free parameter: these tests run
-    under ``StatsConfig()``, whose ``weights`` block is absent, so the new
-    order is required to build no weight plan at all — were the hoisted
-    hydrofabric load ever to produce one, the comparison would still fail.
+    Tracks the previous *order*, not its signature: ``_process_formulation_files``
+    takes the weight plan the later wiring added, forwarded as the ``None``
+    these tests' ``StatsConfig()`` produces.
     """
     results = {}
 
