@@ -511,7 +511,7 @@ def test_weights_carrying_extra_feature_ids_raise(
         },
     )
 
-    with pytest.raises(ValueError, match=r"'feature_id' labels.*\[999\]"):
+    with pytest.raises(ValueError, match=r"'feature_id' labels.*999"):
         build_stats(combined_ds, raw_files, stats_config, weights=wider)
 
 

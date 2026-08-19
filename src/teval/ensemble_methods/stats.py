@@ -41,6 +41,7 @@ import pandas as pd
 import xarray as xr
 
 from teval.config import StatsConfig
+from teval.identifiers import describe
 
 logger = logging.getLogger(__name__)
 
@@ -88,12 +89,12 @@ def _align_weights(combined_ds: xr.Dataset, weights: xr.DataArray) -> xr.DataArr
             if len(missing):
                 problems.append(
                     f"weights omit {len(missing)} of the dataset's "
-                    f"{len(ds_labels)}, e.g. {list(missing[:10])}"
+                    f"{len(ds_labels)}, e.g. {describe(missing)}"
                 )
             if len(unexpected):
                 problems.append(
                     f"weights carry {len(unexpected)} label(s) the dataset "
-                    f"does not, e.g. {list(unexpected[:10])}"
+                    f"does not, e.g. {describe(unexpected)}"
                 )
             raise ValueError(
                 f"weights do not carry exactly the dataset's '{axis}' labels: "
