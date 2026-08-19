@@ -103,7 +103,9 @@ def compute_and_write(
         The mutated domain_data dict with datasets replaced by
         computed results.
     """
-    build_from_raw = domain_dict["formulations"].get("ensemble_file") is None
+    build_from_raw = not workflow.reuses_precomputed_ensemble(
+        domain_dict["formulations"]
+    )
 
     if build_from_raw:
         ds_stats_lazy   = domain_data["formulations"]["combined"]
