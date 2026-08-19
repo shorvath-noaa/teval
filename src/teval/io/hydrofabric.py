@@ -70,8 +70,12 @@ def load_hydrofabric(
     flowpaths = gpd.read_file(gpkg_path, layer="flowpaths")[
         ["id", "toid", "hydroseq", "order", "geometry"]
     ]
-    flowpaths["id"]   = flowpaths["id"].str.replace(r"\D+", "", regex=True).astype(int)
-    flowpaths["toid"] = flowpaths["toid"].str.replace(r"\D+", "", regex=True).astype(int)
+    flowpaths["id"] = as_identifiers(
+        flowpaths["id"], "The flowpaths 'id' column", required=True
+    ).astype("int64")
+    flowpaths["toid"] = as_identifiers(
+        flowpaths["toid"], "The flowpaths 'toid' column", required=True
+    ).astype("int64")
     flowpaths.set_index("id", inplace=True)
 
     # Network / gage crosswalk
@@ -84,7 +88,9 @@ def load_hydrofabric(
         # Nexus ID
         gage_to_nexus = gages_net.groupby("gage")["toid"].first().to_dict()
 
-        gages_net["id"] = gages_net["id"].str.replace(r"\D+", "", regex=True).astype(int)
+        gages_net["id"] = as_identifiers(
+            gages_net["id"], "The network layer's 'id' column", required=True
+        ).astype("int64")
 
         # All upstream feature IDs per gage
         gage_to_fids = (

@@ -22,7 +22,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Stripped from a string identifier like "nex-9001", as load_hydrofabric does.
+# Stripped from a string identifier like "nex-9001".
 _NON_DIGITS = r"\D+"
 
 #: How many offenders an error message names before truncating.
@@ -50,9 +50,9 @@ def as_identifiers(
     """
     Reduce an identifier column to the integer form the hydrofabric stores.
 
-    ``load_hydrofabric`` strips the ``wb-`` and ``nex-`` prefixes, so a frame
-    that has been through it stores ``nex-9001`` as ``9001``, while a weight
-    file or a frame built by other means may still hold the prefixed string.
+    ``load_hydrofabric`` reduces through this function, so a frame that has
+    been through it stores ``nex-9001`` as ``9001``, while a weight file or a
+    frame built by other means may still hold the prefixed string.
     Both are accepted and reduced identically, and every side of a join comes
     through here: two sides normalizing differently is a join that silently
     finds nothing.
