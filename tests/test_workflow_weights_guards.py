@@ -37,6 +37,7 @@ from teval.config import IOConfig, StatsConfig
 from tests.weighting_support import (
     ALL_EQUAL_MEMBER_PARTS,
     EQUAL_MEMBER_PART,
+    PLAN_LOGGER,
     WEIGHTED_MEMBER_PART,
     WORKFLOW_LOGGER,
     domain_map,
@@ -217,7 +218,7 @@ def test_the_coverage_summary_is_logged_once_per_domain(
     """
     config = weighted_config(weight_file, formulation_index_map)
 
-    with caplog.at_level(logging.DEBUG, logger=WORKFLOW_LOGGER):
+    with caplog.at_level(logging.DEBUG, logger=PLAN_LOGGER):
         workflow.load_domain_data(domain_map(raw_files), IOConfig(), config)
 
     summaries = [
@@ -230,7 +231,7 @@ def test_the_coverage_summary_is_logged_once_per_domain(
     assert "weight coverage 100.0%" in summaries[0]
 
     caplog.clear()
-    with caplog.at_level(logging.DEBUG, logger=WORKFLOW_LOGGER):
+    with caplog.at_level(logging.DEBUG, logger=PLAN_LOGGER):
         workflow.load_domain_data(domain_map(raw_files), IOConfig(), config)
         workflow.load_domain_data(domain_map(raw_files), IOConfig(), config)
 
@@ -243,7 +244,7 @@ def test_the_coverage_summary_is_logged_once_per_domain(
 
 def test_no_summary_is_logged_for_an_unweighted_run(raw_files, hydrofabric, caplog):
     """Silence on the unweighted path, so the line means what it says."""
-    with caplog.at_level(logging.DEBUG, logger=WORKFLOW_LOGGER):
+    with caplog.at_level(logging.DEBUG, logger=PLAN_LOGGER):
         workflow.load_domain_data(domain_map(raw_files), IOConfig(), StatsConfig())
 
     assert not [

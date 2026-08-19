@@ -442,7 +442,7 @@ def test_the_unweighted_run_needs_no_weight_machinery(run_inputs, monkeypatch, c
     def explode(*args, **kwargs):
         raise AssertionError("the unweighted run read a weight file")
 
-    monkeypatch.setattr("teval.workflow.read_weight_file", explode)
+    monkeypatch.setattr("teval.weights.plan.read_weight_file", explode)
 
     with caplog.at_level(logging.DEBUG, logger="teval"):
         _run_teval(_config_path(run_inputs), monkeypatch)

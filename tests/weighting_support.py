@@ -22,6 +22,7 @@ import pandas as pd
 from teval.config import StatsConfig, WeightsConfig
 
 RESOLVE_LOGGER = "teval.weights.resolve"
+PLAN_LOGGER = "teval.weights.plan"
 WORKFLOW_LOGGER = "teval.workflow"
 
 

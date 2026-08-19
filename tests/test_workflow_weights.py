@@ -44,6 +44,7 @@ import xarray as xr
 
 from teval import workflow
 from teval.config import IOConfig, StatsConfig
+from teval.weights import plan as weight_plan_module
 
 from tests.weighting_support import (
     ALL_EQUAL_MEMBER_PARTS,
@@ -266,10 +267,12 @@ def test_no_weights_block_builds_no_plan_and_reads_no_file(monkeypatch):
     def explode(*args, **kwargs):
         raise AssertionError("the unweighted path touched the weight machinery")
 
-    monkeypatch.setattr(workflow, "read_weight_file", explode)
-    monkeypatch.setattr(workflow, "build_nexus_crosswalk", explode)
+    monkeypatch.setattr(weight_plan_module, "read_weight_file", explode)
+    monkeypatch.setattr(weight_plan_module, "build_nexus_crosswalk", explode)
 
-    assert workflow._prepare_weight_plan(StatsConfig(), gpd.GeoDataFrame()) is None
+    assert weight_plan_module.prepare_weight_plan(
+        StatsConfig(), gpd.GeoDataFrame()
+    ) is None
 
 
 def test_unweighted_run_hands_build_stats_no_weights(
