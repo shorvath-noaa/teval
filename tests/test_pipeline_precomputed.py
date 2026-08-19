@@ -43,28 +43,31 @@ def _run(domain_data, ensemble_file, config):
     return pipeline.compute_and_write("dom", domain_data, domain_dict, config)
 
 
-@pytest.mark.parametrize(
-    "named_file",
-    [None, Path("/nonexistent/never_written.nc")],
-    ids=["no ensemble file named", "ensemble file named but absent"],
-)
-def test_statistics_built_here_are_written_here(named_file, stats_ds, config):
-    """
-    A domain whose statistics this run built must have them written to disk.
-
-    Both cases build from raw: an unnamed ensemble file obviously, and a named
-    one that is not on disk because ``_process_formulation_files`` falls
-    through to the raw members.  Both must therefore write.
-    """
+def test_statistics_built_here_are_written_here(stats_ds, config):
+    """A domain whose statistics this run built must have them written to disk."""
     domain_data = {"formulations": {"combined": stats_ds, "ensemble_members": None}}
 
-    _run(domain_data, named_file, config)
+    _run(domain_data, None, config)
 
     written = domain_data["formulations"]["_full_nc_path"]
     assert written is not None and written.exists(), (
         f"the statistics this run built were not written; _full_nc_path is "
         f"{written}"
     )
+
+
+def test_a_named_but_absent_ensemble_file_stops_the_write(stats_ds, config):
+    """
+    The pipeline refuses the same configuration the workflow refuses.
+
+    This is the case the two modules disagreed about: ``pipeline`` reported it
+    pre-computed and skipped the write while ``workflow`` built the statistics
+    from raw.  Both now raise, so neither can act on a file that is not there.
+    """
+    domain_data = {"formulations": {"combined": stats_ds, "ensemble_members": None}}
+
+    with pytest.raises(FileNotFoundError, match="never_written.nc"):
+        _run(domain_data, Path("/nonexistent/never_written.nc"), config)
 
 
 def test_an_existing_pre_computed_ensemble_is_not_rewritten(
@@ -84,11 +87,13 @@ def test_an_existing_pre_computed_ensemble_is_not_rewritten(
 
 def test_both_sites_ask_the_same_question(tmp_path):
     """
-    The two branch points agree on a named-but-absent ensemble file.
+    The case the divergence turned on now has one answer: refusal.
 
-    This is the case the divergence turned on: ``.get("ensemble_file") is None``
-    called it a reuse where ``reuses_precomputed_ensemble`` does not.
+    ``.get("ensemble_file") is None`` called a named-but-absent file a reuse
+    where ``reuses_precomputed_ensemble`` called it a rebuild.  Neither reading
+    survives -- the configuration is refused before either branch is taken.
     """
     formulations = {"raw_files": {"a": Path("a.nc")}, "ensemble_file": tmp_path / "absent.nc"}
 
-    assert workflow.reuses_precomputed_ensemble(formulations) is False
+    with pytest.raises(FileNotFoundError, match="absent.nc"):
+        workflow.reuses_precomputed_ensemble(formulations)

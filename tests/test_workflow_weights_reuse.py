@@ -14,9 +14,9 @@ reused ensemble with weights configured, and not on a reused ensemble without
 them, not on a weighted run that actually applied its weights, and not on an
 ordinary unweighted run.  ``reuses_precomputed_ensemble`` — the single
 predicate all the reuse decisions ask — is tested directly alongside, including
-the case of a domain map naming a file that is not on disk, where the run
-falls back to the raw members and the missing-hydrofabric guard must therefore
-stay armed.
+the case of a domain map naming a file that is not on disk, which it refuses
+rather than answering, so no site can act on a configuration the others would
+read differently.
 """
 
 from __future__ import annotations
@@ -204,19 +204,27 @@ def test_a_reused_ensemble_without_a_hydrofabric_warns_rather_than_aborts(
     [
         ({"raw_files": {}, "ensemble_file": None}, False),
         ({"raw_files": {}}, False),
-        ({"raw_files": {}, "ensemble_file": Path("nowhere/absent.nc")}, False),
     ],
-    ids=["no-file", "no-key", "named-but-absent"],
+    ids=["no-file", "no-key"],
 )
 def test_the_reuse_predicate_answers_from_the_domain_map(entry, expected):
-    """
-    Only a file that is actually on disk counts as a reuse.
-
-    A named file that is missing falls through to the raw members, so the
-    statistics get built here after all -- and a run that builds them is a run
-    that needs the crosswalk.
-    """
+    """Naming no ensemble file is the only way not to reuse one."""
     assert workflow.reuses_precomputed_ensemble(entry) is expected
+
+
+def test_the_reuse_predicate_refuses_a_named_but_absent_file():
+    """
+    The third answer the predicate could give is refused instead.
+
+    Leaving it as "not a reuse" is what let ``pipeline`` and ``workflow`` drift:
+    one built the statistics from raw while the other reported them
+    pre-computed.  Refusing outright removes the third case, so the question is
+    answerable from the domain map alone and every site gets the same answer.
+    """
+    with pytest.raises(FileNotFoundError, match="absent.nc"):
+        workflow.reuses_precomputed_ensemble(
+            {"raw_files": {}, "ensemble_file": Path("nowhere/absent.nc")}
+        )
 
 
 def test_the_reuse_predicate_recognises_a_file_on_disk(precomputed_ensemble_file):
@@ -226,21 +234,20 @@ def test_the_reuse_predicate_recognises_a_file_on_disk(precomputed_ensemble_file
     ) is True
 
 
-def test_a_named_but_absent_ensemble_file_leaves_the_hydrofabric_guard_armed(
-    tmp_path, raw_files, weight_file, formulation_index_map, no_hydrofabric, caplog,
+def test_a_named_but_absent_ensemble_file_aborts_the_run(
+    tmp_path, raw_files, weight_file, formulation_index_map, hydrofabric, caplog,
 ):
     """
-    Both guards read the same predicate, so they cannot disagree about a run.
+    Naming an ensemble that is not there is refused, not quietly rebuilt.
 
-    Pointing at an ensemble file that was never written is not a bypass: the
-    formulation step falls through to the raw members and builds the statistics
-    itself, so the crosswalk really is needed and its absence is the accurate
-    complaint.  Were the two sites to drift on what counts as a reuse, this
-    configuration would slip past the error *and* draw no warning, and the run
-    would produce an unweighted mean with nothing said.
+    The alternative -- falling through to the raw members -- returns a mean the
+    run never asked for, computed from different inputs than the configuration
+    named, with nothing in the output saying so.  A path that points at nothing
+    is far more likely stale than deliberate, so it stops the run and says which
+    file it could not find.
     """
     with caplog.at_level(logging.DEBUG, logger=WORKFLOW_LOGGER):
-        with pytest.raises(ValueError, match="no hydrofabric"):
+        with pytest.raises(FileNotFoundError, match="never_written.nc"):
             workflow.load_domain_data(
                 domain_map(raw_files, ensemble_file=tmp_path / "never_written.nc"),
                 IOConfig(),

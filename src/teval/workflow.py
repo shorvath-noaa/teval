@@ -71,12 +71,29 @@ def reuses_precomputed_ensemble(formulation_dict: Dict) -> bool:
     not applied to -- and they must agree about a given run, which they can
     only be relied on to do while they ask the same function.
 
-    A named file that is not on disk is not a reuse: ``_process_formulation_files``
-    falls through to the raw members and builds the statistics itself, so the
-    weighted path is live and the crosswalk is needed after all.
+    Naming the file is what decides it, because naming one that is not there is
+    refused outright: a configuration pointing at a missing ensemble is far more
+    likely a stale path than a request to rebuild, and rebuilding would hand
+    back numbers the run was not asked for without saying so.  Refusing here
+    keeps the question decidable from the domain map alone, which is what lets
+    every site share this one answer.
+
+    Raises
+    ------
+    FileNotFoundError
+        The domain map names an ensemble file that is not on disk.
     """
     ensemble_file = formulation_dict.get("ensemble_file")
-    return bool(ensemble_file and ensemble_file.exists())
+    if ensemble_file is None:
+        return False
+
+    if not ensemble_file.exists():
+        raise FileNotFoundError(
+            f"The domain map names the pre-computed ensemble {ensemble_file}, "
+            f"which does not exist. Point it at the ensemble to reuse, or "
+            f"remove the entry to build the statistics from the raw members."
+        )
+    return True
 
 
 # Functions for loading domain data based on the domain map created in initialize_domains
