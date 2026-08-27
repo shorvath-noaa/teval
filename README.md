@@ -82,6 +82,7 @@ src/teval/
 ├── io/                 Input discovery, hydrofabric loading, observation loading
 ├── ensemble_methods/   Ensemble stat computation (mean, spread)
 ├── metrics/            NSE, KGE, PBIAS, significance testing
+├── weights/            Spatially varying ensemble weights (read, resolve, provenance)
 ├── viz/                Static maps, interactive map, animation
 ├── obs/                USGS observation retrieval
 └── experimental/       In-development features (performance-weighted mean)

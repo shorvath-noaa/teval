@@ -9,6 +9,9 @@ load_hydrofabric(gpkg_path)
     Read a ``.gpkg`` file and return the flowpath GeoDataFrame together with
     the gage crosswalk structures needed downstream.
 
+build_nexus_crosswalk(gdf_hydro)
+    Map each nexus to the feature ids draining to it, for weighting.
+
 find_tailwater_feature(gdf_hydro)
     Identify outlet (tailwater) flowpaths in a hydrofabric GeoDataFrame.
 """
@@ -22,6 +25,8 @@ from typing import Dict, List, Optional, Tuple
 import geopandas as gpd
 import pandas as pd
 import numpy as np
+
+from teval.identifiers import as_identifiers
 
 logger = logging.getLogger(__name__)
 
@@ -65,8 +70,12 @@ def load_hydrofabric(
     flowpaths = gpd.read_file(gpkg_path, layer="flowpaths")[
         ["id", "toid", "hydroseq", "order", "geometry"]
     ]
-    flowpaths["id"]   = flowpaths["id"].str.replace(r"\D+", "", regex=True).astype(int)
-    flowpaths["toid"] = flowpaths["toid"].str.replace(r"\D+", "", regex=True).astype(int)
+    flowpaths["id"] = as_identifiers(
+        flowpaths["id"], "The flowpaths 'id' column", required=True
+    ).astype("int64")
+    flowpaths["toid"] = as_identifiers(
+        flowpaths["toid"], "The flowpaths 'toid' column", required=True
+    ).astype("int64")
     flowpaths.set_index("id", inplace=True)
 
     # Network / gage crosswalk
@@ -79,7 +88,9 @@ def load_hydrofabric(
         # Nexus ID
         gage_to_nexus = gages_net.groupby("gage")["toid"].first().to_dict()
 
-        gages_net["id"] = gages_net["id"].str.replace(r"\D+", "", regex=True).astype(int)
+        gages_net["id"] = as_identifiers(
+            gages_net["id"], "The network layer's 'id' column", required=True
+        ).astype("int64")
 
         # All upstream feature IDs per gage
         gage_to_fids = (
@@ -113,6 +124,111 @@ def load_hydrofabric(
     else:
         gdf = flowpaths
     return gdf, gage_ids, gage_to_fids, gage_to_nexus
+
+
+def build_nexus_crosswalk(
+    gdf_hydro: Optional[gpd.GeoDataFrame],
+) -> Dict[int, List[int]]:
+    """
+    Map each nexus to the feature ids draining to it.
+
+    Ensemble weights are supplied per nexus while the ensemble dataset is
+    indexed by ``feature_id``, so applying them needs this crosswalk.  The
+    relationship is many-to-one: every flowpath at a confluence drains to the
+    same nexus and therefore shares its weights.
+
+    The mapping is derived entirely from the ``toid`` column of the flowpaths
+    frame that has already been loaded, so this reads no file and adds no
+    GeoPackage access to a run.
+
+    Nexus keys come from ``toid`` and feature ids from the frame's index, and
+    the two are never crossed; both are reduced by
+    :func:`teval.identifiers.as_identifiers`, whose docstring gives the reason
+    for each.
+
+    Parameters
+    ----------
+    gdf_hydro:
+        Flowpaths frame as ``load_hydrofabric`` returns it: indexed by integer
+        feature id with a ``toid`` column naming the downstream nexus.  ``None``
+        or an empty frame means no hydrofabric was configured for this domain.
+
+    Returns
+    -------
+    dict[int, list[int]]
+        Nexus id to the feature ids draining to it, both as plain integers.
+        Nexus keys follow first appearance in the frame and each list follows
+        frame order, so the result is deterministic.  A nexus appears only if
+        at least one flowpath drains to it.  An absent or empty hydrofabric
+        gives an empty dict, which resolves to no coverage rather than to an
+        error — the caller decides whether missing weights matter.
+
+    Raises
+    ------
+    ValueError
+        A non-empty frame has no ``toid`` column, an identifier column holds a
+        non-integral value, or a feature id is missing.
+
+    Notes
+    -----
+    Flowpaths whose ``toid`` is missing are dropped with a warning: they cannot
+    be placed at a nexus, and they surface downstream as uncovered features
+    under the weight coverage policy.  A feature that drains to two different
+    nexuses is left in both groups for the resolver to reject, so that rule
+    lives in one place.
+    """
+    if gdf_hydro is None or len(gdf_hydro) == 0:
+        logger.debug(
+            "No hydrofabric flowpaths available; nexus crosswalk is empty."
+        )
+        return {}
+
+    if "toid" not in gdf_hydro.columns:
+        found = ", ".join(str(c) for c in gdf_hydro.columns) or "(none)"
+        raise ValueError(
+            f"Flowpaths frame has no 'toid' column, so the nexus each flowpath "
+            f"drains to is unknown and no crosswalk can be built. Found "
+            f"column(s): {found}."
+        )
+
+    # Both sides are pulled onto a fresh positional index so the id taken from
+    # the frame's index and the toid taken from the column stay row-aligned.
+    features = as_identifiers(
+        pd.Series(gdf_hydro.index.to_numpy()), "The flowpath id column"
+    )
+    nexus = as_identifiers(pd.Series(gdf_hydro["toid"].to_numpy()), "The toid column")
+
+    if features.isna().any():
+        raise ValueError(
+            f"{int(features.isna().sum())} flowpath(s) carry no usable feature "
+            f"id in the frame's index, so they cannot be crosswalked to a nexus."
+        )
+
+    unplaced = int(nexus.isna().sum())
+    if unplaced:
+        logger.warning(
+            f"{unplaced} flowpath(s) carry no usable 'toid' and are left out of "
+            f"the nexus crosswalk; they will count as uncovered if weights are "
+            f"applied."
+        )
+
+    pairs = (
+        pd.DataFrame({"feature_id": features, "nexus_id": nexus})
+        .dropna()
+        .astype({"feature_id": "int64", "nexus_id": "int64"})
+        .drop_duplicates()
+    )
+
+    crosswalk = {
+        int(nexus_id): [int(feature_id) for feature_id in group]
+        for nexus_id, group in pairs.groupby("nexus_id", sort=False)["feature_id"]
+    }
+
+    logger.debug(
+        f"Built nexus crosswalk: {len(crosswalk)} nexus over "
+        f"{len(pairs)} flowpath(s)."
+    )
+    return crosswalk
 
 
 def find_tailwater_feature(gdf_hydro: gpd.GeoDataFrame) -> np.ndarray:

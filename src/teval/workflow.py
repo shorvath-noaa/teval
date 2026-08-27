@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 import geopandas as gpd
 import matplotlib.pyplot as plt
-from typing import Dict, List
+from typing import Dict, List, Optional
 import logging
 import multiprocessing
 from joblib import Parallel, delayed
@@ -16,6 +16,12 @@ from teval.ensemble_methods.stats import build_stats
 from teval.io import load_hydrofabric, fetch_observations
 from teval.utils import Timer
 from teval.metrics import deterministic as det
+from teval.weights import (
+    WeightPlan,
+    prepare_weight_plan,
+    resolve_domain_weights,
+    weighting_attrs,
+)
 import teval.viz.static as tviz
 import teval.viz.animation as tanim
 
@@ -53,21 +59,93 @@ def get_gage_fids(domain_data: Dict, viz_config: VizConfig) -> np.ndarray:
 
     return np.intersect1d(list(set(required_fids)), ds_stats.feature_id.values)
 
+
+def reuses_precomputed_ensemble(formulation_dict: Dict) -> bool:
+    """
+    Say whether this domain returns a pre-computed ensemble instead of building one.
+
+    Answered from the domain map alone, so it is known before anything is
+    loaded.  Both weighting guard rails turn on this one question -- the
+    missing-hydrofabric error is not applied to a domain that needs no
+    crosswalk, and the bypass warning is made for exactly the domains it is
+    not applied to -- and they must agree about a given run, which they can
+    only be relied on to do while they ask the same function.
+
+    Naming the file is what decides it, because naming one that is not there is
+    refused outright: a configuration pointing at a missing ensemble is far more
+    likely a stale path than a request to rebuild, and rebuilding would hand
+    back numbers the run was not asked for without saying so.  Refusing here
+    keeps the question decidable from the domain map alone, which is what lets
+    every site share this one answer.
+
+    Raises
+    ------
+    FileNotFoundError
+        The domain map names an ensemble file that is not on disk.
+    """
+    ensemble_file = formulation_dict.get("ensemble_file")
+    if ensemble_file is None:
+        return False
+
+    if not ensemble_file.exists():
+        raise FileNotFoundError(
+            f"The domain map names the pre-computed ensemble {ensemble_file}, "
+            f"which does not exist. Point it at the ensemble to reuse, or "
+            f"remove the entry to build the statistics from the raw members."
+        )
+    return True
+
+
 # Functions for loading domain data based on the domain map created in initialize_domains
 def load_domain_data(domain_dict: Dict, io: IOConfig, stats_config: StatsConfig) -> Dict:
-    """Load all data needed for one domain: formulations, hydrofabric, and observations."""
+    """
+    Load all data needed for one domain: hydrofabric, formulations, and observations.
+
+    The three steps are ordered by what they depend on, not by convenience:
+
+    1. Hydrofabric first.  It depends only on domain_dict['hydrofabric'], so it
+       can be loaded before anything else -- and it must be, because the
+       nexus-to-feature crosswalk it yields is what a weighted run needs in
+       hand before the ensemble stats graph is built.
+    2. Formulations second, which is where the stats graph is constructed.
+       When stats.weights is configured, the weight plan built from steps 1's
+       hydrofabric is resolved here, against the formulation names and feature
+       ids the opened dataset reports, and handed to build_stats.
+    3. Observations last, because the fetch window is derived from the time
+       bounds the formulation files report.
+
+    With no stats.weights block the plan is None and every step behaves exactly
+    as it did before weighting existed -- including for a domain with no
+    hydrofabric, which stays a supported entry.
+
+    Raises
+    ------
+    ValueError
+        Weights are configured for a domain that will build statistics but has
+        no hydrofabric, which makes the nexus-to-feature crosswalk impossible.
+        Raised in step 1, before a single formulation file is opened.  A domain
+        reusing a pre-computed ensemble is exempt: it needs no crosswalk, and
+        the bypass warning describes it accurately where this error would not.
+    """
     results = {}
-    
-    # Process Formulations
-    results['formulations'] = {'combined': None, 'ensemble_members': None}
-    ds_stats, ds_members, t_min, t_max = _process_formulation_files(domain_dict['formulations'], stats_config)
-    
-    results['formulations']['combined'] = ds_stats
-    results['formulations']['ensemble_members'] = ds_members
-    
+
     # Process Hydrofabric
     results['hydrofabric'], all_gage_ids, results['gage_to_fids'], results['gage_to_nexus'] = load_hydrofabric(domain_dict['hydrofabric'])
-    
+
+    # Prepare Weights (no-op when stats.weights is absent)
+    weight_plan = prepare_weight_plan(
+        stats_config,
+        results['hydrofabric'],
+        reusing_ensemble=reuses_precomputed_ensemble(domain_dict['formulations']),
+    )
+
+    # Process Formulations
+    results['formulations'] = {'combined': None, 'ensemble_members': None}
+    ds_stats, ds_members, t_min, t_max = _process_formulation_files(domain_dict['formulations'], stats_config, weight_plan)
+
+    results['formulations']['combined'] = ds_stats
+    results['formulations']['ensemble_members'] = ds_members
+
     initial_gages = domain_dict.get('gage_obs', {}).get('domain_name', [])
     if "CONUS" in initial_gages: initial_gages.remove("CONUS")
     gage_ids = list(set(initial_gages + all_gage_ids))
@@ -77,10 +155,29 @@ def load_domain_data(domain_dict: Dict, io: IOConfig, stats_config: StatsConfig)
 
     return results
 
-def _process_formulation_files(formulation_dict: Dict, stats_config: StatsConfig) -> tuple:
+def _process_formulation_files(
+    formulation_dict: Dict,
+    stats_config: StatsConfig,
+    weight_plan: Optional[WeightPlan] = None,
+) -> tuple:
     """
     Loads pre-computed ensemble if available, and raw members if available.
     Calculates stats only if a pre-computed ensemble is not provided.
+
+    *weight_plan* carries the weight file and the nexus crosswalk gathered by
+    ``load_domain_data`` before this step ran; it is resolved against the
+    dataset opened here and passed to ``build_stats``.  ``None`` -- the default,
+    and what an unconfigured run supplies -- takes the unweighted path
+    unchanged.  A pre-computed ensemble is returned as it was written and the
+    plan goes unused, since the statistics it holds were built elsewhere; that
+    combination is legal but almost never what was meant, so it warns loudly
+    rather than passing in silence.
+
+    Whichever path the mean took is recorded on the returned statistics dataset
+    as provenance attributes, so the output NetCDF the pipeline writes from it
+    says for itself whether it holds a weighted mean.  A pre-computed ensemble
+    keeps whatever attributes it was written with, untouched: this step did not
+    build those statistics and so has nothing to attest about them.
     """
     raw_files = formulation_dict.get("raw_files", {})
     ensemble_file = formulation_dict.get("ensemble_file")
@@ -90,10 +187,23 @@ def _process_formulation_files(formulation_dict: Dict, stats_config: StatsConfig
     t_min, t_max = None, None
 
     # Load Pre-Computed Ensemble (if it exists)
-    if ensemble_file and ensemble_file.exists():
+    if reuses_precomputed_ensemble(formulation_dict):
         logger.debug(f"Loading pre-computed ensemble from {ensemble_file.name}")
-        
+
         ds_stats = xr.open_dataset(ensemble_file, engine="h5netcdf", chunks={'feature_id': 'auto'})
+
+        # Weighting lives in build_stats, which this branch skips, so the run
+        # otherwise succeeds looking weighted
+        if weight_plan is not None:
+            logger.warning(
+                f"ENSEMBLE WEIGHTS NOT APPLIED: stats.weights configures weights "
+                f"from {weight_plan.config.file}, but this domain reuses the "
+                f"pre-computed ensemble {ensemble_file}. Its statistics were "
+                f"built elsewhere, and weighting is applied where they are built, "
+                f"so the mean in the output is whatever that file already held -- "
+                f"weighted or not. Remove or repoint the pre-computed ensemble to "
+                f"rebuild the statistics with these weights."
+            )
 
         if 'time' in ds_stats.coords:
             t_min = pd.to_datetime(ds_stats.time.min().values)
@@ -121,8 +231,16 @@ def _process_formulation_files(formulation_dict: Dict, stats_config: StatsConfig
 
     # Calculate Stats
     if ds_stats is None and combined_ds is not None:
-        ds_stats = build_stats(combined_ds, raw_files, stats_config)
-        
+        weights, applied = (
+            (None, None) if weight_plan is None
+            else resolve_domain_weights(weight_plan, combined_ds)
+        )
+        ds_stats = build_stats(combined_ds, raw_files, stats_config, weights=weights)
+
+        # Recorded on the dataset itself, so it travels to the NetCDF the
+        # pipeline writes from it.  Both branches: see teval.weights.provenance
+        ds_stats.attrs.update(weighting_attrs(applied))
+
     elif ds_stats is None and combined_ds is None:
         raise ValueError("No ensemble file or raw formulation files found to process.")
         

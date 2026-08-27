@@ -3,7 +3,7 @@
 import yaml
 import textwrap
 from pathlib import Path
-from typing import List, Literal, Optional, Union
+from typing import Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -169,6 +169,86 @@ class DataConfig(BaseModel):
     )
 
 
+class WeightsConfig(BaseModel):
+    """
+    Configuration for spatially varying ensemble weights.
+
+    Supplying this block switches the ensemble mean from a simple mean to a
+    weighted sum over the formulation dimension.  Weights are keyed by nexus
+    and by formulation index; every flowpath draining to a nexus receives that
+    nexus' weights.  Median and the spread band remain unweighted.
+
+    The weight file format is provisional and expected to change.
+    """
+
+    file: Path = Field(
+        description=(
+            "Path to the weight file (.csv or .parquet). "
+            "Columns: 'nexus_id' (string, 'nex-' prefix retained), "
+            "'formulation_index' (1-based integer) and 'weight' (float). "
+            "One row per (nexus, formulation) pair."
+        ),
+    )
+    formulation_index_map: Dict[int, str] = Field(
+        description=(
+            "Binding from the integer 'formulation_index' used in the weight "
+            "file to the formulation name teval parses from run directories, "
+            "e.g. {1: 'cfe', 2: 'noahowp'}. Required because the order of the "
+            "formulation dimension follows directory scan order and is not "
+            "stable across machines, so indices cannot be read positionally. "
+            "Must name exactly the formulations discovered in the run — an "
+            "index naming an absent formulation, or a discovered formulation "
+            "missing from the map, is an error."
+        ),
+    )
+    on_missing: Literal["warn", "error"] = Field(
+        default="warn",
+        description=(
+            "Policy for features in the run whose nexus is absent from the "
+            "weight file.\n"
+            "  'warn'  : those features fall back to equal weights (the simple "
+            "mean); covered/uncovered counts and the coverage fraction are "
+            "logged at warning level.\n"
+            "  'error' : incomplete coverage aborts the run, before any "
+            "compute is triggered."
+        ),
+    )
+    normalize: bool = Field(
+        default=False,
+        description=(
+            "If True, divide each nexus' weights by their sum, accepting any "
+            "positive scale. If False (default), each group must already sum "
+            "to 1.0 within a tolerance of 1e-6 or the run aborts."
+        ),
+    )
+
+    @field_validator("formulation_index_map")
+    def validate_formulation_index_map(cls, v):
+        """
+        Ensure the map names something and numbers it from 1.
+
+        Both rules hold whatever the run turns out to contain — an empty legend
+        binds no formulation at all, and 1 is the base of the file format
+        itself — so they fail at config load rather than per-domain after
+        discovery and hydrofabric loading.  Whether the map names the *right*
+        formulations does need the run; the resolver settles that with one set
+        comparison, and it is not duplicated here.
+        """
+        if not v:
+            raise ValueError(
+                "formulation_index_map is empty; weighting needs a legend "
+                "binding each weight-file index to a formulation name."
+            )
+
+        bad_indices = sorted(i for i in v if i < 1)
+        if bad_indices:
+            raise ValueError(
+                f"formulation_index_map keys must be 1-based positive integers; "
+                f"got {bad_indices}."
+            )
+        return v
+
+
 class StatsConfig(BaseModel):
     """Configuration for ensemble statistical calculations."""
 
@@ -188,6 +268,18 @@ class StatsConfig(BaseModel):
             "the configured quantiles."
         ),
     )
+    weights: Optional[WeightsConfig] = Field(
+        default=None,
+        description=(
+            "Optional spatially varying ensemble weights. Omit the block "
+            "entirely (or set to null) for the default simple mean. When "
+            "present it requires 'file' and 'formulation_index_map'; see the "
+            "weights section of the configuration guide. Requires a "
+            "hydrofabric, and has no effect when a pre-computed ensemble "
+            "NetCDF is reused."
+        ),
+    )
+
     @field_validator("quantiles")
     def validate_quantiles(cls, v):
         """Ensure all quantile values are between 0 and 1."""
