@@ -30,6 +30,12 @@ class IOConfig(BaseModel):
             "Files matched by domain name: '*{domain_name}*.gpkg'."
         ),
     )
+    hydrofabric_layer: Optional[str] = Field(
+        default="flowpaths",
+        description=(
+            "The layer to read from the hydrofabric, flowpaths or flowlines."
+        ),
+    )
     observations_file: Optional[Path] = Field(
         default=None,
         description=(
@@ -252,6 +258,10 @@ class WeightsConfig(BaseModel):
 class StatsConfig(BaseModel):
     """Configuration for ensemble statistical calculations."""
 
+    enabled: bool = Field(
+            default=False,
+            description="Whether to calculate mean/median/spread from ensemble members.",
+        )
     quantiles: List[float] = Field(
         default=[0.05, 0.95],
         description=(

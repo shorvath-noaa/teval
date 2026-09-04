@@ -23,7 +23,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Literal, Optional, Tuple
 
-from teval.config import IOConfig, MetricsConfig, VizConfig
+from teval.config import IOConfig, MetricsConfig, VizConfig, StatsConfig
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ def discover_formulation_files(troute_dir, naming: str = "suffix") -> dict:
 # Domain map initialization
 # ---------------------------------------------------------------------------
 
-def initialize_domains(io: IOConfig, metrics: MetricsConfig, viz: VizConfig) -> Dict:
+def initialize_domains(io: IOConfig, stats: StatsConfig, metrics: MetricsConfig, viz: VizConfig) -> Dict:
     """
     Scan input directories, group files by domain, and return a prepared
     domain map ready for the pipeline.
@@ -156,12 +156,13 @@ def initialize_domains(io: IOConfig, metrics: MetricsConfig, viz: VizConfig) -> 
                     "ensemble_file": Path | None,
                 },
                 "hydrofabric": Path | None,
+                "hydrofabric_layer": str | None,
                 "gage_obs": {"domain_name": [...], "obs_file": [...]},
             },
             ...
         }
     """
-    load_gpkgs = metrics.enabled or viz.interactive_map.enabled
+    load_gpkgs = stats.enabled or metrics.enabled or viz.interactive_map.enabled
     fetch_obs = metrics.enabled or viz.hydrographs.enabled
 
     domain_map: Dict = {}
@@ -218,6 +219,7 @@ def _create_empty_domain_dict(
         else:
             gpkgs = list(io.hydrofabric_dir.glob(f"*{domain_name}*.gpkg"))
         gpkg_path = gpkgs[0] if gpkgs else None
+        gpkg_layer = io.hydrofabric_layer
 
     obs_info: dict = {}
     if fetch_obs:
@@ -231,5 +233,6 @@ def _create_empty_domain_dict(
     return {
         "formulations": {"raw_files": {}, "ensemble_file": None},
         "hydrofabric": gpkg_path,
+        "hydrofabric_layer": gpkg_layer,
         "gage_obs": obs_info,
     }

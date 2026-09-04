@@ -130,8 +130,10 @@ def load_domain_data(domain_dict: Dict, io: IOConfig, stats_config: StatsConfig)
     results = {}
 
     # Process Hydrofabric
-    results['hydrofabric'], all_gage_ids, results['gage_to_fids'], results['gage_to_nexus'] = load_hydrofabric(domain_dict['hydrofabric'])
-
+    results['hydrofabric'], all_gage_ids, results['gage_to_fids'], results['gage_to_nexus'] = load_hydrofabric(
+        domain_dict['hydrofabric'], domain_dict['hydrofabric_layer']
+        )
+    
     # Prepare Weights (no-op when stats.weights is absent)
     weight_plan = prepare_weight_plan(
         stats_config,
