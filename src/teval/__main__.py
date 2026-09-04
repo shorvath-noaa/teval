@@ -67,6 +67,7 @@ def main():
     # Domain processing                                                   #
     # ------------------------------------------------------------------ #
     run_domain_processing = any([
+        config.stats.enabled,
         config.metrics.enabled,
         config.viz.hydrographs.enabled,
         config.viz.animation.enabled,
@@ -78,8 +79,8 @@ def main():
 
     if run_domain_processing:
         with Timer("Domain Discovery", category="discovery"):
-            domain_map = initialize_domains(config.io, config.metrics, config.viz)
-
+            domain_map = initialize_domains(config.io, config.stats, config.metrics, config.viz)
+        
         n = len(domain_map)
         logger.info(f"Found {n} domain(s) to process.")
         metrics_list = []

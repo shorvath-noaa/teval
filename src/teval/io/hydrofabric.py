@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 def load_hydrofabric(
     gpkg_path: Optional[Path],
+    gpkg_layer: Optional[str]
 ) -> Tuple[gpd.GeoDataFrame, List[str], Dict, Dict]:
     """
     Load a hydrofabric GeoPackage and build the gage crosswalk.
@@ -43,6 +44,9 @@ def load_hydrofabric(
     gpkg_path:
         Path to the .gpkg file, or None if no hydrofabric is needed
         for this domain (metrics and interactive map will be skipped).
+    gpkg_layer:
+        Layer to read from the hydrofabric. As of hydrofabric v4.0, this could
+        be either "flowpaths" or "flowlines".
 
     Returns
     -------
@@ -67,9 +71,55 @@ def load_hydrofabric(
         return gdf, gage_ids, gage_to_fids, gage_to_nexus
 
     # Flowpaths
-    flowpaths = gpd.read_file(gpkg_path, layer="flowpaths")[
-        ["id", "toid", "hydroseq", "order", "geometry"]
-    ]
+    flowpaths = gpd.read_file(gpkg_path, layer=gpkg_layer)
+    available_cols = flowpaths.columns
+    col_mappings = {
+        "id": ["id", "flowline_id", "flowpath_id"],
+        "toid": ["toid", "flowpath_toid"],
+        "hydroseq": ["hydroseq", "flowpath_hydroseq", "flowline_hydroseq"], 
+        "order": ["order", "streamorder"],
+        "geometry": ["geometry"]
+    }
+
+    cols_to_keep = []
+    rename_dict = {}
+
+    for standard_name, possible_names in col_mappings.items():
+        match = next((col for col in possible_names if col in available_cols), None)
+        if match:
+            cols_to_keep.append(match)
+            if match != standard_name:
+                rename_dict[match] = standard_name
+        else:
+            raise KeyError(f"Could not find a valid column for '{standard_name}'. Checked: {possible_names}")
+    
+    fp_outlet_fl_df = pd.DataFrame()
+    if 'flowline_id' in cols_to_keep:
+        cols_to_keep.append('flowpath_id')
+        flowpaths = promote_connecting_flowlines(flowpaths, id_col="flowline_id",toid_col="flowline_toid",flag_col="routeable")
+        flowpaths = flowpaths[flowpaths['routeable']]
+        def get_outlet_flowline_per_flowpath(df):
+            # Create a lookup mapping every flowline_id to its parent flowpath_id
+            id_to_path = df.set_index('flowline_id')['flowpath_id']
+            
+            # Look up the flowpath_id for the downstream segment (the 'toid')
+            # If the toid is an outlet or not in the dataset, this returns NaN
+            downstream_flowpath = df['flowline_toid'].map(id_to_path)
+            
+            # A flowline is the furthest downstream for its flowpath if it exits that flowpath
+            is_terminal = df['flowpath_id'] != downstream_flowpath
+            
+            # Filter and return the results
+            return df[is_terminal][['flowpath_id', 'flowline_id', 'flowline_toid']]
+        
+        fp_outlet_fl_df = get_outlet_flowline_per_flowpath(flowpaths)
+    
+    flowpaths = flowpaths[cols_to_keep]
+    flowpaths = flowpaths.rename(columns=rename_dict)
+    
+    if "flowapth_id" not in flowpaths.columns:
+        flowpaths["flowpath_id"] = flowpaths["id"]
+            
     flowpaths["id"] = as_identifiers(
         flowpaths["id"], "The flowpaths 'id' column", required=True
     ).astype("int64")
@@ -79,12 +129,32 @@ def load_hydrofabric(
     flowpaths.set_index("id", inplace=True)
 
     # Network / gage crosswalk
-    network = gpd.read_file(gpkg_path, layer="network")
-    gages_net = network[network["hl_uri"].str.startswith("gages-", na=False)].copy()
+    if rename_dict:
+        hydrolocations = gpd.read_file(gpkg_path, layer='hydrolocations')
+        hydrolocations = hydrolocations[hydrolocations['hl_class']=='gage'][['flowpath_id','hl_reference']].drop_duplicates().dropna(subset='flowpath_id')
+        gages_net = pd.merge(hydrolocations, flowpaths[['flowpath_id','toid']].reset_index(), on='flowpath_id')
+        gages_net['hl_reference'] = gages_net['hl_reference'].str.split('|')
+        exploded_gages = gages_net.explode('hl_reference')
+        exploded_gages['hl_reference'] = exploded_gages['hl_reference'].str.strip()
+        gages_net = exploded_gages.copy()
+        gages_net[['type', 'gage_id']] = gages_net['hl_reference'].str.split('-', n=1, expand=True)
+        gages_net['type'] = gages_net['type'].str.strip()
+        gages_net['gage_id'] = gages_net['gage_id'].str.strip()
+        gages_net = gages_net[gages_net['type']=='nwis'].drop(columns=['hl_reference'])
+        gages_net.rename(columns={'gage_id': 'gage'}, inplace=True)
+        
+        #TODO: Test that this works with an updated hydrofabric
+        if not fp_outlet_fl_df.empty:
+            fp_outlet_fl_df = fp_outlet_fl_df[fp_outlet_fl_df['flowpath_id'].isin(gages_net.flowpath_id)]
+            gages_net = gages_net[gages_net['id'].isin(fp_outlet_fl_df.flowline_id)]
+        
 
-    if not gages_net.empty:
+    else:
+        network = gpd.read_file(gpkg_path, layer="network")
+        gages_net = network[network["hl_uri"].str.startswith("gages-", na=False)].copy()
         gages_net["gage"] = gages_net["hl_uri"].str.replace("gages-", "")
-
+    
+    if not gages_net.empty:
         # Nexus ID
         gage_to_nexus = gages_net.groupby("gage")["toid"].first().to_dict()
 
@@ -123,6 +193,7 @@ def load_hydrofabric(
         gdf = flowpaths.to_crs(epsg=4326)
     else:
         gdf = flowpaths
+    
     return gdf, gage_ids, gage_to_fids, gage_to_nexus
 
 
@@ -249,3 +320,37 @@ def find_tailwater_feature(gdf_hydro: gpd.GeoDataFrame) -> np.ndarray:
     toids     = gdf_hydro["toid"]
     missing   = ~toids.isin(ids)
     return gdf_hydro.loc[missing].index.values
+
+def promote_connecting_flowlines(
+    flowlines_df,
+    id_col="flowline_id",
+    toid_col="flowline_toid",
+    flag_col="routeable",
+):
+    if flag_col not in flowlines_df.columns:
+        return flowlines_df
+ 
+    df = flowlines_df.copy()
+    df[flag_col] = df[flag_col].fillna(False).astype(bool)
+ 
+    next_id = dict(zip(df[id_col], df[toid_col]))
+    is_routed = dict(zip(df[id_col], df[flag_col]))
+ 
+    promoted = set()
+    for flowline_id, routed in is_routed.items():
+        if not routed:
+            continue
+        current = next_id.get(flowline_id)
+        while (
+            current is not None
+            and current in is_routed
+            and not is_routed[current]
+            and current not in promoted
+        ):
+            promoted.add(current)
+            current = next_id.get(current)
+ 
+    if promoted:
+        df.loc[df[id_col].isin(promoted), flag_col] = True
+ 
+    return df
